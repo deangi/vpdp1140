@@ -92,6 +92,7 @@ static void wifi_connect() {
 
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(host);
+  WiFi.setAutoReconnect(true);
   WiFi.begin(ssid, pass);
 
   LOG("WiFi connecting to \"%s\" (hostname=%s) ...", ssid, host);
@@ -168,6 +169,55 @@ static void disks_mount() {
     LOG("disks_mount %c: \"%s\" -> %s",
         'A' + s, paths[s]->c_str(), ok ? "mounted" : "FAILED");
   }
+}
+
+// Status bar drawn in the 40 px strip below the 80x25 console: drive activity
+// indicators, IP address, telnet state and emulation speed.
+static void draw_status_bar() {
+  static uint32_t prev_io[DRIVE_COUNT] = {0, 0, 0, 0};
+  static uint32_t prev_inst = 0;
+  static uint32_t prev_ms   = 0;
+  const int sy = CON_ROWS * CELL_H;          // 200
+
+  tft.drawFastHLine(0, sy, TFT_W, TFT_DARKGREY);
+
+  // Drive indicators A B C D - green=mounted, yellow=active, dim=empty.
+  for (int s = 0; s < DRIVE_COUNT; s++) {
+    uint32_t r = 0, w = 0;
+    disk_stats(s, &r, &w);
+    bool active = (r + w) != prev_io[s];
+    prev_io[s] = r + w;
+    uint16_t col = !disk_is_mounted(s) ? 0x2945
+                 : active             ? TFT_YELLOW
+                                      : TFT_GREEN;
+    int bx = 6 + s * 36;
+    tft.fillRoundRect(bx, sy + 5, 32, 16, 2, col);
+    tft.setTextColor(TFT_BLACK, col);
+    tft.setTextDatum(MC_DATUM);
+    char lbl[3] = { (char)('A' + s), ':', 0 };
+    tft.drawString(lbl, bx + 16, sy + 13, 1);
+  }
+  tft.setTextDatum(TL_DATUM);
+
+  // Emulation speed over the last interval.
+  uint32_t now  = millis();
+  uint32_t inst = cpu_inst_count();
+  float mips = 0.0f;
+  if (prev_ms && now > prev_ms && inst >= prev_inst)
+    mips = (float)(inst - prev_inst) / (float)(now - prev_ms) / 1000.0f;
+  prev_inst = inst;
+  prev_ms   = now;
+
+  tft.fillRect(156, sy + 1, TFT_W - 156, TFT_H - sy - 1, TFT_BLACK);
+  tft.setTextColor(WiFi.status() == WL_CONNECTED ? TFT_WHITE : TFT_RED, TFT_BLACK);
+  tft.drawString(WiFi.status() == WL_CONNECTED
+                   ? WiFi.localIP().toString().c_str() : "WiFi down",
+                 158, sy + 6, 1);
+  char line[40];
+  snprintf(line, sizeof(line), "%s   %.2f MIPS",
+           telnet_connected() ? "TELNET" : "      ", mips);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString(line, 158, sy + 22, 1);
 }
 
 // Boot (or reboot) DOS with the currently-mounted drives. cold=true reloads a
@@ -259,9 +309,11 @@ void setup() {
 void loop() {
   if (!cpu_running) { delay(100); return; }
 
-  static bool     boot_done = false;
-  static bool     was_open  = false;
-  static uint32_t last_tap  = 0;
+  static bool     boot_done  = false;
+  static bool     was_open   = false;
+  static uint32_t last_tap   = 0;
+  static uint32_t status_ms  = 0;
+  static uint32_t wifi_ms    = 0;
 
   // Touch input. Menu open -> taps drive the menu. Menu closed -> a
   // double-tap (two taps within 450 ms) opens the settings menu.
@@ -290,6 +342,7 @@ void loop() {
     tft.fillRect(0, CON_ROWS * CELL_H, TFT_W, TFT_H - CON_ROWS * CELL_H,
                  TFT_BLACK);
     console_force_redraw();
+    status_ms = 0;                 // force a status-bar repaint
   }
   was_open = open_now;
 
@@ -311,6 +364,17 @@ void loop() {
   }
   telnet_poll();
   console_render(tft);           // refresh changed TFT cells
+
+  // Status bar (~2 Hz) and WiFi health check (~0.1 Hz).
+  uint32_t now = millis();
+  if (now - status_ms >= 500) { status_ms = now; draw_status_bar(); }
+  if (now - wifi_ms >= 10000) {
+    wifi_ms = now;
+    if (WiFi.status() != WL_CONNECTED) {
+      LOGE("WiFi link down - reconnecting");
+      WiFi.reconnect();
+    }
+  }
 
   // "Reboot 8088" from the menu.
   if (ui_consume_reboot()) {
