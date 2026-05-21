@@ -1,0 +1,16 @@
+#pragma once
+#include <stdint.h>
+
+// Single-client Telnet server. The guest console (the BIOS ANSI/PUTCHAR
+// stream) is sent raw to the client; client keystrokes are queued to the
+// guest keyboard. A telnet client is itself an ANSI terminal, so no
+// translation of the output stream is needed.
+
+void        telnet_begin(uint16_t port, bool enabled);
+void        telnet_poll();              // call every loop: accept + RX + flush TX
+void        telnet_write(uint8_t c);    // queue one console-output byte
+
+bool        telnet_connected();
+const char* telnet_client_ip();          // "" when no client
+uint16_t    telnet_port();
+bool        telnet_enabled();

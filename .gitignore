@@ -1,0 +1,10 @@
+# Upstream reference material (downloads used to generate bios_blob.h /
+# font4x8.h). Not needed to build - the generated headers are committed.
+_upstream_8086tiny/
+
+# Build artifacts
+build/
+*.bin
+
+# Plan / scratch
+*.tmp
