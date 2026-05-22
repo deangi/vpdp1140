@@ -19,6 +19,7 @@ bool disk_mount(int slot, const char* path);
 void disk_dismount(int slot);
 
 bool        disk_is_mounted(int slot);
+bool        disk_is_readonly(int slot);   // true if the image opened read-only
 const char* disk_path(int slot);          // mounted path, or ""
 uint32_t    disk_size_bytes(int slot);    // 0 if not mounted
 

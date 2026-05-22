@@ -12,6 +12,7 @@
 // Partitioning: Huge App (3mb app, 1mb spiffs)
 // Need to go to tools : USB CDC on boot - enable, enable OPI PSRAM, set flash to 16MB
 // V1.0 20-May-2026, Dean Gienger, Claude
+// Note: WinImage can mount virtual floppy's and copy files back and forth, use insert menu to add files, then write disk
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -35,6 +36,12 @@ static Freenove_ESP32_WS2812 strip(LED_COUNT, LED_PIN, LED_CHANNEL, TYPE_GRB);
 static AppConfig cfg;
 static bool sd_ok = false;
 static bool cpu_running = false;   // true once DOS is booting in loop()
+
+// The 8088 runs on core 1 (loop); all TFT rendering runs on core 0
+// (render_task). The settings menu is the only shared mutable UI state -
+// this mutex guards it. The 80x25 console grid is updated lock-free; a
+// torn read just produces one self-correcting frame.
+static SemaphoreHandle_t g_ui_mutex = nullptr;
 
 enum BootState { BOOT_RUNNING, BOOT_OK, BOOT_FAIL };
 static BootState boot_state = BOOT_RUNNING;
@@ -240,8 +247,48 @@ static void start_dos(bool cold) {
   cpu_set_boot_drive(hdd_boot ? 0x80 : 0x00);
 
   console_init();
-  tft.fillScreen(TFT_BLACK);
-  console_force_redraw();
+  console_force_redraw();   // render_task repaints the whole console + status bar
+}
+
+// ---- mutex-guarded UI calls (menu state is shared core1 <-> core0) ----
+static void ui_open_locked() {
+  xSemaphoreTake(g_ui_mutex, portMAX_DELAY);
+  ui_open();
+  xSemaphoreGive(g_ui_mutex);
+}
+static void ui_tap_locked(int x, int y) {
+  xSemaphoreTake(g_ui_mutex, portMAX_DELAY);
+  ui_handle_tap(x, y);
+  xSemaphoreGive(g_ui_mutex);
+}
+
+// ---- core 0: all TFT rendering ----
+static void render_task(void* arg) {
+  (void)arg;
+  bool     was_open  = false;
+  uint32_t status_ms = 0;
+  for (;;) {
+    bool open = ui_is_open();
+    if (was_open && !open) {
+      // Menu just closed: clear the strip below the console, full repaint.
+      tft.fillRect(0, CON_ROWS * CELL_H, TFT_W, TFT_H - CON_ROWS * CELL_H,
+                   TFT_BLACK);
+      console_force_redraw();
+      status_ms = 0;
+    }
+    was_open = open;
+
+    if (open) {
+      xSemaphoreTake(g_ui_mutex, portMAX_DELAY);
+      ui_draw(tft);
+      xSemaphoreGive(g_ui_mutex);
+    } else {
+      console_render(tft);
+      uint32_t now = millis();
+      if (now - status_ms >= 500) { status_ms = now; draw_status_bar(); }
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
 }
 
 void setup() {
@@ -300,62 +347,57 @@ void setup() {
     start_dos(false);
     cpu_running = true;
     led(0, 0, 32);          // blue = DOS booting
+
+    // Spin up the core-0 rendering task. The 8088 then runs in loop() on core 1.
+    g_ui_mutex = xSemaphoreCreateMutex();
+    xTaskCreatePinnedToCore(render_task, "render", 10240, NULL, 1, NULL, 0);
   } else {
     tft_status(ROW_CPU, "CPU:   ", "alloc FAILED", TFT_RED);
     led(32, 0, 0);
   }
 }
 
+// loop() runs on core 1 and IS the 8088: CPU emulation plus telnet, touch and
+// the settings-menu logic. It never touches the TFT - render_task (core 0)
+// owns the display.
 void loop() {
   if (!cpu_running) { delay(100); return; }
 
-  static bool     boot_done  = false;
-  static bool     was_open   = false;
-  static uint32_t last_tap   = 0;
-  static uint32_t status_ms  = 0;
-  static uint32_t wifi_ms    = 0;
+  static bool     boot_done = false;
+  static bool     btn_prev  = true;
+  static uint32_t last_tap  = 0;
+  static uint32_t wifi_ms   = 0;
 
-  // Touch input. Menu open -> taps drive the menu. Menu closed -> a
-  // double-tap (two taps within 450 ms) opens the settings menu.
+  // Touch: menu open -> taps drive the menu; closed -> a double-tap opens it.
   int tx, ty;
   if (touch_poll(&tx, &ty)) {
     if (ui_is_open()) {
-      ui_handle_tap(tx, ty);
+      ui_tap_locked(tx, ty);
     } else {
       uint32_t now = millis();
-      if (now - last_tap < 450) { ui_open(); last_tap = 0; }
+      if (now - last_tap < 450) { ui_open_locked(); last_tap = 0; }
       else                        last_tap = now;
     }
   }
 
-  // Onboard button (GPIO0, active low): press opens the menu, like a double-tap.
-  static bool btn_prev = true;
+  // Onboard button (GPIO0, active low): press opens the menu.
   bool btn_now = digitalRead(BUTTON_PIN);
-  if (btn_prev && !btn_now && !ui_is_open()) ui_open();
+  if (btn_prev && !btn_now && !ui_is_open()) ui_open_locked();
   btn_prev = btn_now;
 
-  // Repaint the console when the menu has just closed. The console only
-  // covers the top 200 px (25 rows x 8 px); clear the strip below it too,
-  // otherwise the menu's nav bar lingers there.
-  bool open_now = ui_is_open();
-  if (was_open && !open_now) {
-    tft.fillRect(0, CON_ROWS * CELL_H, TFT_W, TFT_H - CON_ROWS * CELL_H,
-                 TFT_BLACK);
-    console_force_redraw();
-    status_ms = 0;                 // force a status-bar repaint
-  }
-  was_open = open_now;
-
-  // While the menu is open the 8088 is paused; just service the UI.
-  if (open_now) {
-    ui_draw(tft);
-    delay(20);
-    return;
+  // "Reboot 8088" from the menu (the menu has already closed itself).
+  if (ui_consume_reboot()) {
+    LOG("ui: reboot 8088");
+    start_dos(true);
+    boot_done = false;
+    led(0, 0, 32);
   }
 
-  // Run the 8088 in small slices, servicing telnet + serial between each so
-  // the network console stays responsive. The TFT is refreshed once per loop
-  // (rendering is the costly part and doesn't need to run at 8088 speed).
+  // While the menu is open the 8088 is paused; just keep polling for taps.
+  if (ui_is_open()) { delay(8); return; }
+
+  // Running: feed the keyboard, run the 8088 in small slices, service telnet
+  // between slices so the network console stays responsive.
   for (int slice = 0; slice < 5; slice++) {
     while (Serial.available())
       console_key_push((uint8_t)Serial.read());
@@ -363,11 +405,9 @@ void loop() {
     cpu_run(8000);
   }
   telnet_poll();
-  console_render(tft);           // refresh changed TFT cells
 
-  // Status bar (~2 Hz) and WiFi health check (~0.1 Hz).
+  // WiFi health check (~0.1 Hz).
   uint32_t now = millis();
-  if (now - status_ms >= 500) { status_ms = now; draw_status_bar(); }
   if (now - wifi_ms >= 10000) {
     wifi_ms = now;
     if (WiFi.status() != WL_CONNECTED) {
@@ -376,19 +416,10 @@ void loop() {
     }
   }
 
-  // "Reboot 8088" from the menu.
-  if (ui_consume_reboot()) {
-    LOG("ui: reboot 8088");
-    start_dos(true);
-    boot_done = false;
-    led(0, 0, 32);
-    return;
-  }
-
   // Status LED: blue while booting, green once DOS has gone quiet at a prompt.
   if (!boot_done && console_feed_count() > 0 &&
       millis() - console_last_feed_ms() > 800) {
     boot_done = true;
-    led(0, 32, 0);          // green = boot complete
+    led(0, 32, 0);
   }
 }

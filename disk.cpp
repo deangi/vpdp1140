@@ -6,9 +6,10 @@
 
 struct DriveSlot {
   File     file;
-  bool     mounted = false;
-  bool     is_hdd  = false;
-  bool     changed = false;        // media-change flag (set on mount)
+  bool     mounted  = false;
+  bool     is_hdd   = false;
+  bool     changed  = false;       // media-change flag (set on mount)
+  bool     readonly = false;       // image could only be opened read-only
   char     path[64] = {0};
   uint32_t size = 0;
   uint32_t reads = 0;
@@ -24,10 +25,16 @@ bool disk_mount(int slot, const char* path) {
 
   disk_dismount(slot);   // ensure clean slot
 
+  // Prefer read-write; fall back to read-only if the image is write-protected.
+  bool readonly = false;
   File f = SD_MMC.open(path, "r+");
   if (!f) {
-    LOGE("disk_mount[%d]: cannot open %s", slot, path);
-    return false;
+    f = SD_MMC.open(path, "r");
+    if (!f) {
+      LOGE("disk_mount[%d]: cannot open %s", slot, path);
+      return false;
+    }
+    readonly = true;
   }
   uint32_t sz = (uint32_t)f.size();
 
@@ -41,17 +48,19 @@ bool disk_mount(int slot, const char* path) {
     return false;
   }
 
-  g_drv[slot].file    = f;
-  g_drv[slot].mounted = true;
-  g_drv[slot].is_hdd  = is_hdd;
-  g_drv[slot].changed = true;        // signal DOS the media changed
-  g_drv[slot].size    = sz;
-  g_drv[slot].reads   = 0;
-  g_drv[slot].writes  = 0;
+  g_drv[slot].file     = f;
+  g_drv[slot].mounted  = true;
+  g_drv[slot].is_hdd   = is_hdd;
+  g_drv[slot].changed  = true;        // signal DOS the media changed
+  g_drv[slot].readonly = readonly;
+  g_drv[slot].size     = sz;
+  g_drv[slot].reads    = 0;
+  g_drv[slot].writes   = 0;
   strncpy(g_drv[slot].path, path, sizeof(g_drv[slot].path) - 1);
   g_drv[slot].path[sizeof(g_drv[slot].path) - 1] = 0;
 
-  LOG("disk_mount[%c]: %s (%u bytes)", 'A' + slot, path, (unsigned)sz);
+  LOG("disk_mount[%c]: %s (%u bytes)%s", 'A' + slot, path, (unsigned)sz,
+      readonly ? " [read-only]" : "");
   return true;
 }
 
@@ -68,6 +77,10 @@ void disk_dismount(int slot) {
 
 bool disk_is_mounted(int slot) {
   return slot_valid(slot) && g_drv[slot].mounted;
+}
+
+bool disk_is_readonly(int slot) {
+  return slot_valid(slot) && g_drv[slot].mounted && g_drv[slot].readonly;
 }
 
 const char* disk_path(int slot) {
@@ -103,6 +116,7 @@ int disk_read(int slot, uint32_t byte_offset, void* buf, uint32_t bytes) {
 int disk_write(int slot, uint32_t byte_offset, const void* buf, uint32_t bytes) {
   if (!disk_is_mounted(slot)) return -1;
   DriveSlot& d = g_drv[slot];
+  if (d.readonly) return -1;          // write-protected image -> INT 13h reports 0x03
   if (byte_offset + bytes > d.size) {
     LOGE("disk_write[%c]: out of range off=%u len=%u size=%u",
          'A' + slot, (unsigned)byte_offset, (unsigned)bytes, (unsigned)d.size);

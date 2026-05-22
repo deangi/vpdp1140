@@ -117,7 +117,8 @@ static void rebuild() {
       strcpy(g_title, "Drives");
       for (int s = 0; s < 4; s++) {
         if (disk_is_mounted(s))
-          snprintf(g_items[g_count++], 44, "%c: %s", 'A' + s, disk_path(s));
+          snprintf(g_items[g_count++], 44, "%c: %s%s", 'A' + s, disk_path(s),
+                   disk_is_readonly(s) ? " [RO]" : "");
         else
           snprintf(g_items[g_count++], 44, "%c: (empty)", 'A' + s);
       }
