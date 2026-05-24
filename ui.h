@@ -17,5 +17,5 @@ bool ui_handle_tap(int x, int y);
 // Draw the menu overlay when open and the screen needs a repaint.
 void ui_draw(TFT_eSPI& tft);
 
-// One-shot: returns true once if the user asked to reboot the 8088.
+// One-shot: returns true once if the user asked to reboot the PDP-11.
 bool ui_consume_reboot();

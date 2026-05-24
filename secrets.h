@@ -6,4 +6,4 @@
 
 #define WIFI_SSID      "YourSSID"
 #define WIFI_PASS      "YourPassword"
-#define WIFI_HOSTNAME  "v8088"
+#define WIFI_HOSTNAME  "vpdp1140"

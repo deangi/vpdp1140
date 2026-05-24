@@ -1,4 +1,4 @@
-// 4x8 monospace font for the v8088 TFT console.
+// 4x8 monospace font for the vpdp1140 TFT console.
 // Derived from the public-domain 8x8 IBM VGA font (dhepper/font8x8)
 // by keeping even-numbered columns. Glyphs 0x00-0x7F; 0x80-0xFF blank.
 // Each byte = one 8-pixel-tall row; bits 0..3 = pixels left..right.

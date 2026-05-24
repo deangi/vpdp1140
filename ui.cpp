@@ -107,11 +107,11 @@ static void rebuild() {
   g_count = 0;
   switch (g_screen) {
     case SC_MAIN:
-      strcpy(g_title, "v8088 Settings");
+      strcpy(g_title, "PDP-11/40 Settings");
       strcpy(g_items[g_count++], "Drives");
       strcpy(g_items[g_count++], "System Info");
       strcpy(g_items[g_count++], "Brightness");
-      strcpy(g_items[g_count++], "Reboot 8088");
+      strcpy(g_items[g_count++], "Reboot PDP-11");
       break;
     case SC_DRIVES:
       strcpy(g_title, "Drives");

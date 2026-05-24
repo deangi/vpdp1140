@@ -1,9 +1,9 @@
 #pragma once
 
 // ---- App metadata ----
-#define APP_TITLE       "v8088"
-#define APP_VERSION     "1.0"
-#define APP_BUILD_DATE  "2026-05-20"
+#define APP_TITLE       "vpdp1140"
+#define APP_VERSION     "0.0-m0"
+#define APP_BUILD_DATE  "2026-05-23"
 
 // ---- RGB LED (WS2812) ----
 #define LED_PIN         42
@@ -40,21 +40,36 @@
 
 // ---- File paths on SD (defaults; overridden by /config.ini) ----
 #define CFG_PATH        "/config.ini"
-#define DEFAULT_A_IMG   "/dos331.img"
-#define DEFAULT_C_IMG   "/hd_c_32mb.img"
+#define DEFAULT_DL0_IMG "/rt11sj.dsk"      // RT-11 SJ V5.x on RL02 (10 MB)
+#define DEFAULT_DL1_IMG ""                  // DL1 dismounted by default
+
+// (Legacy names so existing call sites in the m0 codebase still build until
+// task #6's appconfig rework lands; they map to the corresponding RL02 slot.)
+#define DEFAULT_A_IMG   DEFAULT_DL0_IMG
+#define DEFAULT_C_IMG   DEFAULT_DL0_IMG
 
 // ---- Network ----
 #define TELNET_PORT     23
 
 // ---- Disk geometries ----
-#define FD_BYTES        1474560UL          // 80 x 2 x 18 x 512
-#define FD_CYL          80
-#define FD_HEADS        2
-#define FD_SEC          18
-#define HD_BYTES        33554432UL         // 1024 x 4 x 16 x 512 = exact 32 MB
-#define HD_CYL          1024
-#define HD_HEADS        4
-#define HD_SEC          16
+// RL02: 512 cylinders x 2 heads x 40 sectors x 256 words = 10 485 760 bytes.
+#define RL02_BYTES      10485760UL
+#define RL02_CYL        512
+#define RL02_HEADS      2
+#define RL02_SEC        40
+#define RL02_WORDS_PER_SEC 256
+#define RL02_BYTES_PER_SEC (RL02_WORDS_PER_SEC * 2)   // 512 bytes/sector
+
+// Legacy FD_/HD_ aliases (kept until m6 retires v8088's drive vocabulary
+// from disk.cpp / appconfig.cpp / .ino). They both map to RL02 geometry now.
+#define FD_BYTES        RL02_BYTES
+#define FD_CYL          RL02_CYL
+#define FD_HEADS        RL02_HEADS
+#define FD_SEC          RL02_SEC
+#define HD_BYTES        RL02_BYTES
+#define HD_CYL          RL02_CYL
+#define HD_HEADS        RL02_HEADS
+#define HD_SEC          RL02_SEC
 
 // ---- Boot tuning ----
 #define WIFI_CONNECT_TIMEOUT_MS  20000

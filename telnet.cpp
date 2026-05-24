@@ -89,7 +89,7 @@ void telnet_poll() {
   if (g_server.hasClient()) {
     WiFiClient nc = g_server.available();
     if (g_client && g_client.connected()) {
-      nc.print("\r\nv8088: console already in use\r\n");
+      nc.print("\r\nvpdp1140: console already in use\r\n");
       nc.stop();
     } else {
       g_client = nc;

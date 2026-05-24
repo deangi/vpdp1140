@@ -152,7 +152,7 @@ bool config_write_defaults(const AppConfig& cfg) {
     LOGE("Could not open %s for write", CFG_PATH);
     return false;
   }
-  f.println("; v8088 configuration file");
+  f.println("; vpdp1140 configuration file");
   f.println("; Edit values then power-cycle the board.");
   f.println("; Lines starting with ; or # are comments.");
   f.println();
