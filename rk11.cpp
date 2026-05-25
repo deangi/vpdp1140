@@ -38,9 +38,12 @@
 #include "sam11_platform.h"
 #include "sam11.h"
 #include "dd11.h"
+#include "kd11.h"   // procNS::interrupt for RK11 done-IRQ
 #include "disk.h"
 
 #include <Arduino.h>
+
+#define procNS kd11
 
 namespace rk11 {
 
@@ -243,6 +246,13 @@ static void execute()
     // sign bit) waiting for CRDY before proceeding.
     RKCS |= (1 << 7);
     RKDS |= (1 << 7);
+
+    // Fire the RK11 done-interrupt if Interrupt Enable (RKCS bit 6) is
+    // set. RT-11's RK driver issues WAIT after each command and depends
+    // on INTRK to wake; without this, we'd hang in the dispatcher.
+    if (RKCS & (1 << 6)) {
+        procNS::interrupt(INTRK, 5);
+    }
 }
 
 uint16_t read16(uint32_t a)
