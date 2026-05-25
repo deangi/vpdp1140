@@ -59,6 +59,12 @@ uint32_t cpu_inst_count();
 // loaded into RAM. (m0 stub: no-op.)
 void cpu_set_pc(uint16_t pc);
 
+// Select which boot ROM cpu_reset() will install before transferring control
+// to the boot path. 0 = RL11 (bootrom_rl0, for RL02 packs like XXDP+),
+// 1 = RK11 (bootrom_rk0, for RK05 packs like RT-11 v5). Default is RL.
+// Call this BEFORE cpu_reset()/cpu_cold_boot() to pick a different boot path.
+void cpu_set_boot_kind(int kind);
+
 // m1 acceptance test: write a tiny PDP-11 program (MOV #5, R0; MOV #7, R1;
 // ADD R0, R1; BR .-2) directly to PSRAM, run it ~20 cycles, assert
 // R0==5 and R1==12. Logs PASS/FAIL on Serial. Returns true on PASS.

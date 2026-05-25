@@ -188,12 +188,19 @@ static void sd_and_config_init() {
 }
 
 // Mount the four guest drives from /config.ini paths.
+// When boot=rk0 we substitute disk_rk0 into slot 0 (so the RK11 controller
+// sees the RK05 image as drive 0) and the corresponding unit name flips
+// from "DL0" to "RK0".
 static void disks_mount() {
   if (!sd_ok) { LOGE("disks_mount: SD not available"); return; }
+  const bool rk_boot = (cfg.boot_kind == AppConfig::BK_RK);
   const String* paths[DRIVE_COUNT] = {
-    &cfg.disk_a, &cfg.disk_b, &cfg.disk_c, &cfg.disk_d
+    rk_boot && cfg.disk_rk0.length() ? &cfg.disk_rk0 : &cfg.disk_a,
+    &cfg.disk_b, &cfg.disk_c, &cfg.disk_d
   };
-  static const char* unit_names[DRIVE_COUNT] = { "DL0", "DL1", "DX0", "DX1" };
+  const char* unit_names[DRIVE_COUNT] = {
+    rk_boot ? "RK0" : "DL0", "DL1", "DX0", "DX1"
+  };
   for (int s = 0; s < DRIVE_COUNT; s++) {
     if (paths[s]->length() == 0) continue;
     bool ok = disk_mount(s, paths[s]->c_str());
@@ -212,8 +219,12 @@ static void draw_status_bar() {
 
   tft.drawFastHLine(0, sy, TFT_W, TFT_DARKGREY);
 
-  // Drive indicators DL0 DL1 DX0 DX1 - green=mounted, yellow=active, dim=empty.
-  static const char* const unit_labels[DRIVE_COUNT] = { "DL0", "DL1", "DX0", "DX1" };
+  // Drive indicators DL0/DL1/DX0/DX1 (or RK0/DL1/DX0/DX1 when booting RK05) -
+  // green=mounted, yellow=active, dim=empty.
+  const char* unit_labels[DRIVE_COUNT] = {
+    (cfg.boot_kind == AppConfig::BK_RK) ? "RK0" : "DL0",
+    "DL1", "DX0", "DX1"
+  };
   for (int s = 0; s < DRIVE_COUNT; s++) {
     uint32_t r = 0, w = 0;
     disk_stats(s, &r, &w);
@@ -374,10 +385,13 @@ void setup() {
     pinMode(BUTTON_PIN, INPUT_PULLUP);   // onboard button opens the menu
     touch_init();
     ui_init();
-    const char* boot_name = (cfg.boot_drive == 'a') ? "DL0"
-                          : (cfg.boot_drive == 'b') ? "DL1"
-                          : (cfg.boot_drive == 'c') ? "DX0"
-                          : (cfg.boot_drive == 'd') ? "DX1" : "?";
+    const char* boot_name;
+    if (cfg.boot_kind == AppConfig::BK_RK) boot_name = "RK0";
+    else boot_name = (cfg.boot_drive == 'a') ? "DL0"
+                   : (cfg.boot_drive == 'b') ? "DL1"
+                   : (cfg.boot_drive == 'c') ? "DX0"
+                   : (cfg.boot_drive == 'd') ? "DX1" : "?";
+    cpu_set_boot_kind(cfg.boot_kind == AppConfig::BK_RK ? 1 : 0);
     LOG("--- booting PDP-11 from %s, console -> TFT ---", boot_name);
     start_cpu(false);
     cpu_running = true;

@@ -108,6 +108,12 @@ static uint8_t*       s_mem = nullptr;
 static uint32_t       s_inst_count = 0;
 static volatile bool  s_halt_requested = false;
 static bool           s_sam11_inited = false;
+// 0 = RL (bootrom_rl0, for RL02 XXDP+/etc.), 1 = RK (bootrom_rk0, for RK05
+// RT-11/Unix V6/etc.). vpdp1140.ino sets this from cfg.boot_kind before
+// calling cpu_reset().
+static int            s_boot_kind = 0;
+
+void cpu_set_boot_kind(int kind) { s_boot_kind = (kind == 1) ? 1 : 0; }
 
 
 bool cpu_init() {
@@ -140,16 +146,27 @@ void cpu_reset() {
   ky11::reset();
   kd11::reset();
   rl11::reset();
+  rk11::reset();
 
-  // Overwrite kd11's RK0 boot block with the RL0 boot block. Both load
-  // at BOOT_START (02000 octal); the RL0 ROM is ~57 words. Using
-  // dd11::write16 instead of direct PSRAM writes so any future bus
-  // tracing sees it the same as a real bootstrap.
-  const uint32_t rl_words = sizeof(bootrom_rl0) / sizeof(uint16_t);
-  LOG("cpu_reset: loading RL0 boot ROM (%u words) at PC = 0%o",
-      (unsigned)rl_words, (unsigned)BOOT_START);
-  for (uint32_t i = 0; i < rl_words; i++) {
-    dd11::write16(BOOT_START + (i * 2), bootrom_rl0[i]);
+  // Install the chosen boot ROM at BOOT_START (02000 octal). kd11::reset()
+  // installs bootrom_rk0 by default; we overwrite that region with either
+  // bootrom_rl0 (RL02 packs - XXDP+, RSTS, V6 on RL) or bootrom_rk0
+  // (RK05 packs - RT-11, V6 on RK). The boot ROM does the actual disk-
+  // sector-0 load and jump-to-zero; we just stamp it into RAM.
+  if (s_boot_kind == 1) {
+    const uint32_t rk_words = sizeof(bootrom_rk0) / sizeof(uint16_t);
+    LOG("cpu_reset: loading RK0 boot ROM (%u words) at PC = 0%o",
+        (unsigned)rk_words, (unsigned)BOOT_START);
+    for (uint32_t i = 0; i < rk_words; i++) {
+      dd11::write16(BOOT_START + (i * 2), bootrom_rk0[i]);
+    }
+  } else {
+    const uint32_t rl_words = sizeof(bootrom_rl0) / sizeof(uint16_t);
+    LOG("cpu_reset: loading RL0 boot ROM (%u words) at PC = 0%o",
+        (unsigned)rl_words, (unsigned)BOOT_START);
+    for (uint32_t i = 0; i < rl_words; i++) {
+      dd11::write16(BOOT_START + (i * 2), bootrom_rl0[i]);
+    }
   }
 
   // ----- Banner program at 01000 -----
@@ -182,7 +199,9 @@ void cpu_reset() {
   for (uint32_t i = 0; i < banner_words; i++) {
     dd11::write16(0001000 + (i * 2), banner_prog[i]);
   }
-  const char* msg = "vpdp1140: booting PDP-11/40...\r\n";
+  const char* msg = (s_boot_kind == 1)
+                  ? "vpdp1140: booting PDP-11/40 from RK0...\r\n"
+                  : "vpdp1140: booting PDP-11/40 from DL0...\r\n";
   uint8_t* bytes = (uint8_t*)s_mem;
   uint32_t mi = 0;
   while (msg[mi]) { bytes[0001100 + mi] = (uint8_t)msg[mi]; mi++; }

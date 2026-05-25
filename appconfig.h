@@ -17,11 +17,21 @@ struct AppConfig {
   int    telnet_port    = 23;
 
   // [disks]
-  String disk_a;       // floppy A (1.44 MB)
-  String disk_b;       // floppy B
-  String disk_c;       // HDD C (32 MB)
-  String disk_d;       // HDD D
+  // slot 0..3 holds whatever the host has mounted at DL0/DL1/DX0/DX1 -
+  // RL controller sees them as RL02/RX02 packs.
+  String disk_a;
+  String disk_b;
+  String disk_c;
+  String disk_d;
+  // Optional RK05 image. When boot_kind == BK_RK we mount this at slot 0
+  // (overriding disk_a) so the RK11 controller can find it as RK drive 0.
+  String disk_rk0;
+  // Boot drive: which of the four physical slots is the boot disk (encoded
+  // as 'a'..'d' for slot 0..3). boot_kind tells cpu_reset() which boot ROM
+  // to install + which controller is being used (RL11 vs RK11).
   char   boot_drive = 'a';
+  enum BootKind { BK_RL = 0, BK_RK = 1 };
+  uint8_t boot_kind = BK_RL;
 };
 
 // SD card

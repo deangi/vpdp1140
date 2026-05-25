@@ -60,7 +60,9 @@ void config_apply_compiled_defaults(AppConfig& cfg) {
   cfg.disk_b        = "";
   cfg.disk_c        = DEFAULT_C_IMG;
   cfg.disk_d        = "";
+  cfg.disk_rk0      = "";
   cfg.boot_drive    = 'a';
+  cfg.boot_kind     = AppConfig::BK_RL;
 }
 
 // -------- parser --------
@@ -102,17 +104,22 @@ static void parse_line(AppConfig& cfg, String& section, const String& raw) {
   } else if (section == "disks") {
     // Drive slot 0..3 maps to PDP-11 unit names dl0/dl1 (RL02) and
     // dx0/dx1 (RX02). Internally we still index by char 'a'..'d' to
-    // keep the slot-array indexing in vpdp1140.ino simple.
+    // keep the slot-array indexing in vpdp1140.ino simple. rk0 is a
+    // separate logical key that, when boot=rk0, gets mounted at slot 0
+    // in place of dl0 so the RK11 controller can find it.
     if      (key == "dl0")      cfg.disk_a = val;
     else if (key == "dl1")      cfg.disk_b = val;
     else if (key == "dx0")      cfg.disk_c = val;
     else if (key == "dx1")      cfg.disk_d = val;
+    else if (key == "rk0")      cfg.disk_rk0 = val;
     else if (key == "boot") {
       String v = to_lower(val);
+      cfg.boot_kind = AppConfig::BK_RL;
       if      (v == "dl0" || v == "0")  cfg.boot_drive = 'a';
       else if (v == "dl1" || v == "1")  cfg.boot_drive = 'b';
       else if (v == "dx0" || v == "2")  cfg.boot_drive = 'c';
       else if (v == "dx1" || v == "3")  cfg.boot_drive = 'd';
+      else if (v == "rk0") { cfg.boot_drive = 'a'; cfg.boot_kind = AppConfig::BK_RK; }
       else if (v.length() == 1 && v[0] >= 'a' && v[0] <= 'd')
         cfg.boot_drive = v[0];           // legacy single-char form
       else
@@ -141,6 +148,7 @@ bool config_load(AppConfig& cfg) {
   parsed.disk_b = "";
   parsed.disk_c = "";
   parsed.disk_d = "";
+  parsed.disk_rk0 = "";
 
   String section;
   while (f.available()) {
@@ -187,16 +195,21 @@ bool config_write_defaults(const AppConfig& cfg) {
   f.println("[disks]");
   f.println("; dl0, dl1 = RL02 10 MB removable disk packs.");
   f.println("; dx0, dx1 = RX02 512 KB double-density floppies.");
+  f.println("; rk0      = RK05 2.5 MB disk pack (e.g. RT-11).");
+  f.println("; When boot=rk0 the rk0 image takes slot 0 in place of dl0.");
   f.println("; Leave a slot blank to dismount it at boot.");
   f.printf("dl0  = %s\r\n", cfg.disk_a.c_str());
   f.printf("dl1  = %s\r\n", cfg.disk_b.c_str());
   f.printf("dx0  = %s\r\n", cfg.disk_c.c_str());
   f.printf("dx1  = %s\r\n", cfg.disk_d.c_str());
-  // Friendly boot value: dl0/dl1/dx0/dx1
-  const char* boot_name = (cfg.boot_drive == 'a') ? "dl0"
-                        : (cfg.boot_drive == 'b') ? "dl1"
-                        : (cfg.boot_drive == 'c') ? "dx0"
-                        : (cfg.boot_drive == 'd') ? "dx1" : "dl0";
+  f.printf("rk0  = %s\r\n", cfg.disk_rk0.c_str());
+  // Friendly boot value: dl0/dl1/dx0/dx1/rk0
+  const char* boot_name;
+  if (cfg.boot_kind == AppConfig::BK_RK) boot_name = "rk0";
+  else boot_name = (cfg.boot_drive == 'a') ? "dl0"
+                 : (cfg.boot_drive == 'b') ? "dl1"
+                 : (cfg.boot_drive == 'c') ? "dx0"
+                 : (cfg.boot_drive == 'd') ? "dx1" : "dl0";
   f.printf("boot = %s\r\n", boot_name);
   f.close();
   LOG("Wrote default %s", CFG_PATH);
@@ -271,13 +284,17 @@ void config_print(const AppConfig& cfg) {
       (int)cfg.wifi_password.length());
   LOG("[telnet]  enabled=%s  port=%d",
       cfg.telnet_enabled ? "true" : "false", cfg.telnet_port);
-  const char* boot_name = (cfg.boot_drive == 'a') ? "dl0"
-                        : (cfg.boot_drive == 'b') ? "dl1"
-                        : (cfg.boot_drive == 'c') ? "dx0"
-                        : (cfg.boot_drive == 'd') ? "dx1" : "?";
+  const char* boot_name;
+  if (cfg.boot_kind == AppConfig::BK_RK) boot_name = "rk0";
+  else boot_name = (cfg.boot_drive == 'a') ? "dl0"
+                 : (cfg.boot_drive == 'b') ? "dl1"
+                 : (cfg.boot_drive == 'c') ? "dx0"
+                 : (cfg.boot_drive == 'd') ? "dx1" : "?";
   LOG("[disks]   dl0=\"%s\"  dl1=\"%s\"",
       cfg.disk_a.c_str(), cfg.disk_b.c_str());
-  LOG("          dx0=\"%s\"  dx1=\"%s\"  boot=%s",
-      cfg.disk_c.c_str(), cfg.disk_d.c_str(), boot_name);
+  LOG("          dx0=\"%s\"  dx1=\"%s\"",
+      cfg.disk_c.c_str(), cfg.disk_d.c_str());
+  LOG("          rk0=\"%s\"  boot=%s",
+      cfg.disk_rk0.c_str(), boot_name);
   LOG("--------------------------------------");
 }
