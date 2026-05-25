@@ -301,7 +301,9 @@ static void ADD(uint16_t instr)
     uint16_t da = aget(d, 2);
     uint16_t val2 = memread16(da);
     uint16_t uval = (val1 + val2) & 0xFFFF;
+    uint16_t ps_in = PS;     // DBG
     PS &= 0xFFF0;
+    uint16_t ps_a = PS;      // DBG
     setZ(uval == 0);
     if (uval & 0x8000)
     {
@@ -319,6 +321,19 @@ static void ADD(uint16_t instr)
         PS |= FLAGC;
     }
     memwrite16(da, uval);
+    // DEBUG: trace-ring sometimes shows priority bits cleared after ADD
+    // (e.g. PS 0o341 -> 0o010 at PC=164072 during RT-11 boot). Log a few
+    // samples to identify whether ADD itself is clobbering them or
+    // something downstream is.
+    if (curPC == 0164072 || curPC == 0163740) {
+        static int n = 0;
+        if (n < 12) {
+            Serial.printf("[vpdp1140] ADD@%06o  PSin=%06o  PSafterMask=%06o  PSout=%06o  uval=%06o\r\n",
+                          (unsigned)curPC, (unsigned)ps_in, (unsigned)ps_a,
+                          (unsigned)PS, (unsigned)uval);
+            n++;
+        }
+    }
 }
 
 // Subtract

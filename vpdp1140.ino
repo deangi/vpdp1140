@@ -472,8 +472,8 @@ void loop() {
         (unsigned)cpu_reg16(6),
         (unsigned)cpu_psw(),
         (unsigned)cpu_inst_count());
-    // Also dump the last 12 instructions so we can spot tight loops.
-    cpu_dump_trace(12);
+    // Also dump the last 32 instructions so we can spot tight loops.
+    cpu_dump_trace(32);
   }
 
   // WiFi health check (~0.1 Hz).
