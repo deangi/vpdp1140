@@ -59,6 +59,12 @@ uint32_t cpu_inst_count();
 // loaded into RAM. (m0 stub: no-op.)
 void cpu_set_pc(uint16_t pc);
 
+// Dump the last `n_entries` PCs from the instruction-trace ring to Serial,
+// most-recent first. Cheap diagnostic for tracking down "stuck in a loop"
+// states - if PC + R0..R7 don't move much between state-dumps but inst
+// count is climbing, this shows which instructions are actually running.
+void cpu_dump_trace(int n_entries);
+
 // Select which boot ROM cpu_reset() will install before transferring control
 // to the boot path. 0 = RL11 (bootrom_rl0, for RL02 packs like XXDP+),
 // 1 = RK11 (bootrom_rk0, for RK05 packs like RT-11 v5). Default is RL.

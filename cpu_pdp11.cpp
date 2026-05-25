@@ -297,6 +297,22 @@ uint32_t cpu_inst_count() { return s_inst_count; }
 
 void cpu_set_pc(uint16_t pc) { kd11::R[7] = pc; kd11::curPC = pc; }
 
+void cpu_dump_trace(int n_entries) {
+  if (n_entries <= 0) return;
+  if (n_entries > TRACE_RING_SIZE) n_entries = TRACE_RING_SIZE;
+  Serial.printf("[vpdp1140]   trace (last %d):\r\n", n_entries);
+  for (int n = n_entries; n > 0; n--) {
+    uint32_t i = (s_trace_idx + TRACE_RING_SIZE - n) % TRACE_RING_SIZE;
+    TraceEntry& e = s_trace_ring[i];
+    if (e.pc == 0 && e.instr == 0) continue;
+    Serial.printf("  PC=%06o ins=%06o  R0=%06o R1=%06o R2=%06o R3=%06o R4=%06o R5=%06o SP=%06o PS=%06o\r\n",
+                  (unsigned)e.pc, (unsigned)e.instr,
+                  (unsigned)e.r[0], (unsigned)e.r[1], (unsigned)e.r[2],
+                  (unsigned)e.r[3], (unsigned)e.r[4], (unsigned)e.r[5],
+                  (unsigned)e.r[6], (unsigned)e.ps);
+  }
+}
+
 // ---- m1 self-test --------------------------------------------------------
 //
 // Writes the following PDP-11 program at octal address 02000:
