@@ -441,12 +441,14 @@ void loop() {
   }
   telnet_poll();
 
-  // Once-per-second snapshot of guest CPU state - useful while bringing
-  // up disk/OS bootstrap. If PC stays put, the guest is stuck in a tight
-  // loop; if PC moves through a small window, it's a finite poll loop.
+
+  // Once-per-five-seconds snapshot of guest CPU state - useful while
+  // bringing up disk/OS bootstrap. If PC stays put, the guest is stuck
+  // in a tight loop; if PC moves through a small window, it's a finite
+  // poll loop.
   static uint32_t s_state_ms = 0;
   uint32_t s_now = millis();
-  if (s_now - s_state_ms >= 1000) {
+  if (s_now - s_state_ms >= 5000) {
     s_state_ms = s_now;
     LOG("state: PC=0%o R0=0%o R1=0%o R2=0%o R3=0%o R4=0%o R5=0%o SP=0%o PS=0%o inst=%u",
         (unsigned)cpu_pc(),

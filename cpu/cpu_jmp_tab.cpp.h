@@ -390,11 +390,17 @@ case 0106200:  // ASRB 1062DD
 case 0106300:  // ASLB 1063DD
     ASL(instr);
     return;
+case 0106400:  // MTPS 1064DD (PDP-11/34+ Move To Processor Status)
+    MTPS(instr);
+    return;
 case 0106500:  // MFPD 1065SS
     MFPD(instr);
     return;
 case 0106600:  // MTPD 1066DD
     MTPD(instr);
+    return;
+case 0106700:  // MFPS 1067DD (PDP-11/34+ Move From Processor Status)
+    MFPS(instr);
     return;
 default:
     break;

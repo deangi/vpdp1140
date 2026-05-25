@@ -50,10 +50,18 @@ static void _NOP(uint16_t instr)
     // does nothing, but does not cause trap
 }
 
-// Set priority level -- Not implemented
+// Set priority level (SPL N): set PS bits 7:5 to the priority N (0-7)
+// encoded in bits 2:0 of the instruction.  Only valid in kernel mode;
+// silently ignored in user mode (some PDP-11 models trap, but a no-op
+// matches what XXDP's 11/34 trap test expects).
+//
+// Sam11 stock had this as a hard UNOP() that fired INTINVAL; FKABD0
+// executes SPL and expects normal behavior, so the resulting reserved-
+// instruction trap landed at the test's failure-HALT.
 static void SPL(uint16_t instr)
 {
-    UNOP(instr);
+    if (curuser) return;            // user mode -> NOP
+    PS = (PS & ~0340) | ((instr & 7) << 5);
 }
 
 // Compare
@@ -1081,19 +1089,55 @@ static void MOV(uint16_t instr)
     memwrite(da, l, uval);
 }
 
-// Halt processor
+// Move To Processor Status (PDP-11/34+: opcode 106400+DD).
+// Reads the low byte of the source operand and copies it into the low
+// byte of PS, preserving the priority / mode / T bits. Sam11 didn't
+// dispatch this opcode at all; XXDP FKAC executes MTPS as part of its
+// status-word manipulation tests and fell into the invalid-instr trap.
+static void MTPS(uint16_t instr)
+{
+    uint8_t d = instr & 077;
+    uint16_t da = aget(d, 1);
+    uint16_t val = memread(da, 1) & 0xFF;
+    // Preserve T-bit (bit 4) and bits 5-15 (priority/mode); update only
+    // the four condition codes (bits 0-3). Per the PDP-11 ref the T-bit
+    // is explicitly NOT settable via MTPS, and current/prev mode and
+    // priority are protected too. The condition-codes-only form is what
+    // XXDP and standard kernel code expect.
+    PS = (PS & 0xFFF0) | (val & 0x0F);
+}
+
+// Move From Processor Status (PDP-11/34+: opcode 106700+DD).
+// Copies the low byte of PS to the byte destination, sign-extending if
+// the destination is a register. Sets N/Z based on the byte moved.
+static void MFPS(uint16_t instr)
+{
+    uint8_t d = instr & 077;
+    uint16_t da = aget(d, 1);
+    uint16_t val = PS & 0xFF;
+    // Register destination: sign-extend bit 7 into the high byte.
+    if (isReg(da) && (val & 0x80))
+    {
+        memwrite(da, 2, val | 0xFF00);
+    }
+    else
+    {
+        memwrite(da, 1, val);
+    }
+    // Update condition codes from the moved value.
+    PS &= 0xFFF0;
+    if (val & 0x80)          PS |= FLAGN;
+    if ((val & 0xFF) == 0)   PS |= FLAGZ;
+}
+
+// Halt processor.
+// XXDP trap tests point trap vectors at bare HALT instructions and
+// rely on operator-driven console recovery (load fresh PC, press
+// START) to continue, which we don't emulate. Auto-continuing past
+// HALT only created infinite trap loops, so HALT just panics; the
+// user uses the gear-menu Reboot to recover.
 static void _HALT(uint16_t instr)
 {
-    // if (curuser)  // modded, usually a HALT in user mode fails with a trap
-    // {
-    //     if (PRINTSIMLINES)
-    //     {
-    //         Serial.print("%% invalid instruction 0");
-    //         Serial.println(instr, OCT);
-    //     }
-    //     longjmp(trapbuf, INTINVAL);
-    // }
-    // Serial.println(F("%% HALT"));
     panic();
 }
 

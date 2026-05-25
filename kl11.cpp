@@ -132,13 +132,6 @@ void poll()
             {
                 procNS::trapped |= VTRAP_ON_NL;
             }
-            // DEBUG: announce first few input bytes that reach KL11.
-            static int dbg_in_left = 16;
-            if (dbg_in_left > 0) {
-                Serial.printf("[vpdp1140] KL11 in: 0x%02x '%c'  TKS=%06o\r\n",
-                              c, (c >= 0x20 && c < 0x7F) ? c : '.', TKS);
-                dbg_in_left--;
-            }
             addchar(c & 0x7F);
         }
     }

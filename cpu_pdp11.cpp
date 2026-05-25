@@ -49,7 +49,7 @@ struct TraceEntry {
   uint16_t r[8];
   uint16_t ps;
 };
-#define TRACE_RING_SIZE 32
+#define TRACE_RING_SIZE 64
 static TraceEntry s_trace_ring[TRACE_RING_SIZE];
 static uint32_t   s_trace_idx = 0;  // next write slot
 static bool       s_trace_enable = true;
@@ -60,11 +60,11 @@ static bool       s_trace_enable = true;
 // disasm.cpp which is part of the vendored sam11 set.
 void trap(uint16_t /*num*/) { /* deferred to sam11's own trap path */ }
 
-// panic() is called by sam11 on unrecoverable conditions (HALT instruction
-// in kernel mode, RESET in user mode, invalid current/previous user-mode
-// bits, etc.). We log the CPU state, set a flag, and longjmp out so the
-// host loop can recover and continue running (instead of deadlocking
-// core 1).
+// panic() is called by sam11 on conditions it considers unrecoverable
+// (HALT instruction, RESET in user mode, invalid current/previous
+// user-mode bits, etc.). We log the CPU state, set a flag, and longjmp
+// out so the host loop can recover and continue running (instead of
+// deadlocking core 1).
 volatile bool g_panicked = false;
 void panic() {
   LOGE("PDP-11 panic: halted  PC=0%o  R0=0%o R1=0%o R2=0%o R3=0%o R4=0%o R5=0%o SP=0%o  PS=0%o",
