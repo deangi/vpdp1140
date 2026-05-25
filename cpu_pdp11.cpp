@@ -274,6 +274,7 @@ uint32_t cpu_run(uint32_t max_cycles) {
     }
     kd11::step();
     kw11::tick();
+    rk11::tick();   // drives the deferred RK-done IRQ countdown
     kl11::poll();
     executed++;
     s_inst_count++;

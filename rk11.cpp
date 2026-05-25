@@ -62,6 +62,15 @@ static uint16_t RKWC = 0;
 static uint16_t RKBA = 0;
 static uint16_t RKDA = 0;
 
+// Deferred "operation complete" IRQ countdown. We can't fire the IRQ
+// synchronously from execute() - that delivers it BEFORE the guest's
+// WAIT executes (RT-11 issues `MOV cmd,RKCS; WAIT` and our cpu_run drains
+// the IRQ between those two instructions). Real disk hardware takes
+// milliseconds, so the WAIT runs first. We mimic that by counting down
+// a few hundred host instructions in rk11::tick() before raising INTRK.
+static int      irq_pending  = 0;       // > 0 = ticks remaining
+static uint16_t irq_cs_snap  = 0;       // RKCS snapshot when op finished
+
 void reset()
 {
     // RKDS: bit 11 = RK05 ident, bit 7 = DRDY (drive ready), bit 6 = SOK.
@@ -248,10 +257,29 @@ static void execute()
     RKDS |= (1 << 7);
 
     // Fire the RK11 done-interrupt if Interrupt Enable (RKCS bit 6) is
-    // set. RT-11's RK driver issues WAIT after each command and depends
-    // on INTRK to wake; without this, we'd hang in the dispatcher.
+    // set, but DEFERRED: schedule it to land in ~256 host CPU steps via
+    // rk11::tick(). Synchronous firing from inside write16() raises the
+    // IRQ before the guest's WAIT instruction has executed, and our
+    // cpu_run dispatcher drains the IRQ immediately, leaving the WAIT
+    // hanging forever (the symptom: RT-11 monitor loads but never reaches
+    // its sign-on print). Real RK05 hardware takes ms to complete; we
+    // approximate with a few hundred instruction-counts.
     if (RKCS & (1 << 6)) {
-        procNS::interrupt(INTRK, 5);
+        irq_pending = 256;
+        irq_cs_snap = RKCS;
+    }
+}
+
+void tick()
+{
+    if (irq_pending > 0) {
+        if (--irq_pending == 0) {
+            // Only raise INTRK if IE is still set when the timer expires;
+            // RT-11 might have cleared it between issue and now.
+            if (RKCS & (1 << 6)) {
+                procNS::interrupt(INTRK, 5);
+            }
+        }
     }
 }
 

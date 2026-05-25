@@ -62,6 +62,10 @@ extern bool attached_drives[NUM_RK_DRIVES];
 void reset();
 void write16(uint32_t a, uint16_t v);
 uint16_t read16(uint32_t a);
+// Called per CPU step from cpu_pdp11.cpp's cpu_run loop. Counts down a
+// deferred RKINT so the guest's WAIT instruction has time to execute
+// before we deliver the disk-done IRQ.
+void tick();
 };  // namespace rk11
 
 enum
