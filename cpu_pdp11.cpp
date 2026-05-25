@@ -23,7 +23,9 @@
 #include "kl11.h"
 #include "kw11.h"
 #include "rk11.h"
+#include "rl11.h"
 #include "ky11.h"
+#include "dd11.h"
 #include "bootrom.h"
 #include <Arduino.h>
 #include <esp_heap_caps.h>
@@ -37,16 +39,68 @@ jmp_buf trapbuf;
 const char* users_str[4]  = { "kernel", "illegal", "illegal", "user" };
 const char  users_char[4] = { 'K', 'X', 'X', 'U' };
 
+// ---- ring buffer of last N instructions for post-HALT diagnosis ----
+// Each cpu_run iteration captures (PC, opcode, R0..R7, PS) before the
+// instruction executes. On panic() we dump the most recent entries so
+// the user can identify which sam11 instruction tripped the HALT.
+struct TraceEntry {
+  uint16_t pc;
+  uint16_t instr;
+  uint16_t r[8];
+  uint16_t ps;
+};
+#define TRACE_RING_SIZE 32
+static TraceEntry s_trace_ring[TRACE_RING_SIZE];
+static uint32_t   s_trace_idx = 0;  // next write slot
+static bool       s_trace_enable = true;
+
 // sam11 stubs (referenced only in PRINTSIMLINES / DEBUG paths, all
 // compile-time false in our build, but the symbols still need to exist).
 // Note: printstate() and disasm() are NOT defined here - they live in
 // disasm.cpp which is part of the vendored sam11 set.
 void trap(uint16_t /*num*/) { /* deferred to sam11's own trap path */ }
+
+// panic() is called by sam11 on unrecoverable conditions (HALT instruction
+// in kernel mode, RESET in user mode, invalid current/previous user-mode
+// bits, etc.). We log the CPU state, set a flag, and longjmp out so the
+// host loop can recover and continue running (instead of deadlocking
+// core 1).
+volatile bool g_panicked = false;
 void panic() {
-  LOGE("PDP-11 panic: halted");
-  // sam11 calls panic() on unrecoverable conditions. For now we just
-  // log and spin; later we can surface this on the TFT.
-  for (;;) delay(1000);
+  LOGE("PDP-11 panic: halted  PC=0%o  R0=0%o R1=0%o R2=0%o R3=0%o R4=0%o R5=0%o SP=0%o  PS=0%o",
+       (unsigned)kd11::curPC,
+       (unsigned)kd11::R[0], (unsigned)kd11::R[1], (unsigned)kd11::R[2],
+       (unsigned)kd11::R[3], (unsigned)kd11::R[4], (unsigned)kd11::R[5],
+       (unsigned)kd11::R[6], (unsigned)kd11::PS);
+  // Memory window around curPC to spot the trapping instruction.
+  uint32_t pc = kd11::curPC;
+  Serial.printf("[vpdp1140]   mem near PC:");
+  for (int o = -4; o <= 4; o++) {
+    uint32_t a = (pc + o*2) & 0xFFFF;
+    Serial.printf(" %s%06o", o == 0 ? "[" : " ", (unsigned)dd11::read16(a));
+    if (o == 0) Serial.printf("]");
+  }
+  Serial.printf("\r\n");
+
+  // Dump the last TRACE_RING_SIZE instructions leading up to the HALT.
+  // s_trace_idx points at the next write slot, so the oldest valid
+  // entry is at (s_trace_idx - TRACE_RING_SIZE) mod TRACE_RING_SIZE.
+  Serial.printf("[vpdp1140]   --- last %d instructions before HALT ---\r\n",
+                TRACE_RING_SIZE);
+  for (int n = TRACE_RING_SIZE; n > 0; n--) {
+    uint32_t i = (s_trace_idx + TRACE_RING_SIZE - n) % TRACE_RING_SIZE;
+    TraceEntry& e = s_trace_ring[i];
+    if (e.pc == 0 && e.instr == 0) continue;  // empty slot before fill
+    Serial.printf("  PC=%06o ins=%06o R0=%06o R1=%06o R2=%06o R3=%06o R4=%06o R5=%06o SP=%06o PS=%06o\r\n",
+                  (unsigned)e.pc, (unsigned)e.instr,
+                  (unsigned)e.r[0], (unsigned)e.r[1], (unsigned)e.r[2],
+                  (unsigned)e.r[3], (unsigned)e.r[4], (unsigned)e.r[5],
+                  (unsigned)e.r[6], (unsigned)e.ps);
+  }
+
+  g_panicked = true;
+  // Bail out of step() via the trap path so cpu_run can return.
+  longjmp(trapbuf, 0);
 }
 
 // ---- our PSRAM-backed guest memory ----
@@ -54,6 +108,7 @@ static uint8_t*       s_mem = nullptr;
 static uint32_t       s_inst_count = 0;
 static volatile bool  s_halt_requested = false;
 static bool           s_sam11_inited = false;
+
 
 bool cpu_init() {
   if (s_mem) return true;
@@ -79,10 +134,77 @@ void cpu_reset() {
   // kd11::reset() does the heavy lifting: zeros the GPRs/PS/MMU, calls
   // kw11::reset() + ms11::clear() + kl11::reset() + rk11::reset(), writes
   // sam11's bootrom_rk0 boot block to BOOT_START in RAM, sets R7 to
-  // BOOT_START. We just add ky11::reset() (the front panel) since sam11.cpp
-  // does that outside kd11::reset().
+  // BOOT_START. We add ky11::reset() (the front panel) since sam11.cpp
+  // does that outside kd11::reset(), and rl11::reset() because vpdp1140
+  // boots from RL02 not RK05.
   ky11::reset();
   kd11::reset();
+  rl11::reset();
+
+  // Overwrite kd11's RK0 boot block with the RL0 boot block. Both load
+  // at BOOT_START (02000 octal); the RL0 ROM is ~57 words. Using
+  // dd11::write16 instead of direct PSRAM writes so any future bus
+  // tracing sees it the same as a real bootstrap.
+  const uint32_t rl_words = sizeof(bootrom_rl0) / sizeof(uint16_t);
+  LOG("cpu_reset: loading RL0 boot ROM (%u words) at PC = 0%o",
+      (unsigned)rl_words, (unsigned)BOOT_START);
+  for (uint32_t i = 0; i < rl_words; i++) {
+    dd11::write16(BOOT_START + (i * 2), bootrom_rl0[i]);
+  }
+
+  // ----- Banner program at 01000 -----
+  // A tiny native PDP-11 program that prints "vpdp1140: booting PDP-11..."
+  // to the KL11 console then jumps into the RL0 boot ROM at 02000. Lets
+  // us verify the KL11 -> TFT/Telnet/Serial pipe independent of any
+  // disk-boot path. Code + message live below the bootrom, well below
+  // any stack the bootrom will set up (SP = 02000).
+  //
+  //   01000  MOV   #MSG, R0       ; 012700 + 01100
+  //   01004  MOVB  (R0)+, R1
+  //   01006  BEQ   +6              ; if char==0 -> JMP @#02000
+  //   01010  TSTB  @#TPS           ; 105737 + 0177564  (TWO words!)
+  //   01014  BPL   -3              ; back to TSTB (skip BOTH its words)
+  //   01016  MOVB  R1, @#TPB       ; 110137 + 0177566
+  //   01022  BR    -8              ; next char
+  //   01024  JMP   @#02000         ; 000137 + 002000
+  //   01100  "vpdp1140: booting PDP-11...\r\n\0"
+  static const uint16_t banner_prog[] = {
+    0012700, 0001100,   // MOV  #01100, R0
+    0112001,            // MOVB (R0)+, R1
+    0001406,            // BEQ  +6 -> JMP at 01024
+    0105737, 0177564,   // TSTB @#TPS  (2-word instr)
+    0100375,            // BPL  -3 -> back to 01010 TSTB
+    0110137, 0177566,   // MOVB R1, @#TPB  (2-word instr)
+    0000770,            // BR   -8 -> back to 01004 MOVB(R0)+
+    0000137, 0002000,   // JMP  @#02000
+  };
+  const uint32_t banner_words = sizeof(banner_prog) / sizeof(uint16_t);
+  for (uint32_t i = 0; i < banner_words; i++) {
+    dd11::write16(0001000 + (i * 2), banner_prog[i]);
+  }
+  const char* msg = "vpdp1140: booting PDP-11/40...\r\n";
+  uint8_t* bytes = (uint8_t*)s_mem;
+  uint32_t mi = 0;
+  while (msg[mi]) { bytes[0001100 + mi] = (uint8_t)msg[mi]; mi++; }
+  bytes[0001100 + mi] = 0;
+  LOG("cpu_reset: banner installed at 01000, msg at 01100 (%u chars)", (unsigned)mi);
+
+  // Start the CPU at the banner program (01000); it prints + JMP @#02000.
+  kd11::R[7]  = 0001000;
+  kd11::curPC = 0001000;
+  LOG("cpu_reset: ready, R7 = 0%o (banner -> bootrom @02000)",
+      (unsigned)kd11::R[7]);
+
+  g_panicked = false;
+
+  // Clear the instruction-trace ring so the post-HALT dump shows only
+  // entries from this run, not stale ones from the previous boot.
+  for (int i = 0; i < TRACE_RING_SIZE; i++) {
+    s_trace_ring[i].pc = 0;
+    s_trace_ring[i].instr = 0;
+  }
+  s_trace_idx = 0;
+
   s_sam11_inited = true;
   s_halt_requested = false;
 }
@@ -97,25 +219,39 @@ void cpu_cold_boot() {
 // are caught by the setjmp/longjmp pair (kd11/dd11 longjmp to trapbuf with
 // the trap vector, and we route it back through kd11::trapat()).
 uint32_t cpu_run(uint32_t max_cycles) {
-  if (!s_sam11_inited) { yield(); return 0; }
-  uint32_t executed = 0;
+  if (!s_sam11_inited || g_panicked) { yield(); return 0; }
 
-  // setjmp returns 0 the first time and the trap vector when a longjmp
-  // arrives from inside the step path. We MUST set up trapbuf each loop
-  // iteration the same way sam11 does.
+  uint32_t executed = 0;
+  // Catch panics (longjmp from panic()) BEFORE we'd otherwise route them
+  // through kd11::trapat() with a bogus odd vector and recurse forever.
   uint16_t vec = setjmp(trapbuf);
+  if (g_panicked) {
+    return executed;
+  }
   if (vec) {
     kd11::trapat(vec);
+    return executed;  // re-enter cpu_run() to install a fresh trapbuf
   }
 
-  while (executed < max_cycles && !s_halt_requested) {
-    // Pending interrupt?
+  while (executed < max_cycles && !s_halt_requested && !g_panicked) {
+    // Pending interrupt? handleinterrupt() loads the new PC/PSW from the
+    // vector and returns - it may longjmp out for nested-trap cases, in
+    // which case the setjmp at the top of this function will catch it.
+    // Do NOT return here, or we never get to actually run an instruction
+    // when the line clock or other periodic IRQ is pending most of the
+    // time (MIPS would read 0).
     if (itab[0].vec && (itab[0].pri >= ((kd11::PS >> 5) & 7))) {
       kd11::handleinterrupt();
-      // After handleinterrupt() we re-setjmp by continuing the outer loop
-      // (handleinterrupt may longjmp). Easiest: return now and the caller
-      // will re-enter cpu_run() which re-installs the trapbuf.
-      return executed;
+    }
+    // Record this instruction in the trace ring BEFORE step() runs,
+    // so on panic() we can see exactly what was about to execute.
+    if (s_trace_enable) {
+      TraceEntry& e = s_trace_ring[s_trace_idx];
+      e.pc    = kd11::R[7];
+      e.instr = dd11::read16(kt11::decode_instr(kd11::R[7], false, kd11::curuser));
+      for (int i = 0; i < 8; i++) e.r[i] = (uint16_t)kd11::R[i];
+      e.ps    = kd11::PS;
+      s_trace_idx = (s_trace_idx + 1) % TRACE_RING_SIZE;
     }
     kd11::step();
     kw11::tick();

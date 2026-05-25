@@ -193,11 +193,12 @@ static void disks_mount() {
   const String* paths[DRIVE_COUNT] = {
     &cfg.disk_a, &cfg.disk_b, &cfg.disk_c, &cfg.disk_d
   };
+  static const char* unit_names[DRIVE_COUNT] = { "DL0", "DL1", "DX0", "DX1" };
   for (int s = 0; s < DRIVE_COUNT; s++) {
     if (paths[s]->length() == 0) continue;
     bool ok = disk_mount(s, paths[s]->c_str());
-    LOG("disks_mount %c: \"%s\" -> %s",
-        'A' + s, paths[s]->c_str(), ok ? "mounted" : "FAILED");
+    LOG("disks_mount %s: \"%s\" -> %s",
+        unit_names[s], paths[s]->c_str(), ok ? "mounted" : "FAILED");
   }
 }
 
@@ -211,7 +212,8 @@ static void draw_status_bar() {
 
   tft.drawFastHLine(0, sy, TFT_W, TFT_DARKGREY);
 
-  // Drive indicators A B C D - green=mounted, yellow=active, dim=empty.
+  // Drive indicators DL0 DL1 DX0 DX1 - green=mounted, yellow=active, dim=empty.
+  static const char* const unit_labels[DRIVE_COUNT] = { "DL0", "DL1", "DX0", "DX1" };
   for (int s = 0; s < DRIVE_COUNT; s++) {
     uint32_t r = 0, w = 0;
     disk_stats(s, &r, &w);
@@ -224,8 +226,7 @@ static void draw_status_bar() {
     tft.fillRoundRect(bx, sy + 5, 32, 16, 2, col);
     tft.setTextColor(TFT_BLACK, col);
     tft.setTextDatum(MC_DATUM);
-    char lbl[3] = { (char)('A' + s), ':', 0 };
-    tft.drawString(lbl, bx + 16, sy + 13, 1);
+    tft.drawString(unit_labels[s], bx + 16, sy + 13, 1);
   }
   tft.setTextDatum(TL_DATUM);
 
@@ -373,8 +374,11 @@ void setup() {
     pinMode(BUTTON_PIN, INPUT_PULLUP);   // onboard button opens the menu
     touch_init();
     ui_init();
-    LOG("--- booting PDP-11 from %c:, console -> TFT ---",
-        toupper((int)cfg.boot_drive));
+    const char* boot_name = (cfg.boot_drive == 'a') ? "DL0"
+                          : (cfg.boot_drive == 'b') ? "DL1"
+                          : (cfg.boot_drive == 'c') ? "DX0"
+                          : (cfg.boot_drive == 'd') ? "DX1" : "?";
+    LOG("--- booting PDP-11 from %s, console -> TFT ---", boot_name);
     start_cpu(false);
     cpu_running = true;
     led(0, 0, 32);          // blue = PDP-11 booting
@@ -436,6 +440,23 @@ void loop() {
     cpu_run(8000);
   }
   telnet_poll();
+
+  // Once-per-second snapshot of guest CPU state - useful while bringing
+  // up disk/OS bootstrap. If PC stays put, the guest is stuck in a tight
+  // loop; if PC moves through a small window, it's a finite poll loop.
+  static uint32_t s_state_ms = 0;
+  uint32_t s_now = millis();
+  if (s_now - s_state_ms >= 1000) {
+    s_state_ms = s_now;
+    LOG("state: PC=0%o R0=0%o R1=0%o R2=0%o R3=0%o R4=0%o R5=0%o SP=0%o PS=0%o inst=%u",
+        (unsigned)cpu_pc(),
+        (unsigned)cpu_reg16(0), (unsigned)cpu_reg16(1),
+        (unsigned)cpu_reg16(2), (unsigned)cpu_reg16(3),
+        (unsigned)cpu_reg16(4), (unsigned)cpu_reg16(5),
+        (unsigned)cpu_reg16(6),
+        (unsigned)cpu_psw(),
+        (unsigned)cpu_inst_count());
+  }
 
   // WiFi health check (~0.1 Hz).
   uint32_t now = millis();

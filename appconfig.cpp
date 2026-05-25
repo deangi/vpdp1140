@@ -100,11 +100,24 @@ static void parse_line(AppConfig& cfg, String& section, const String& raw) {
                                                      val.equalsIgnoreCase("on"));
     else if (key == "port")     cfg.telnet_port = val.toInt();
   } else if (section == "disks") {
-    if      (key == "a")        cfg.disk_a = val;
-    else if (key == "b")        cfg.disk_b = val;
-    else if (key == "c")        cfg.disk_c = val;
-    else if (key == "d")        cfg.disk_d = val;
-    else if (key == "boot")     cfg.boot_drive = val.length() ? (char)tolower((uint8_t)val[0]) : 'a';
+    // Drive slot 0..3 maps to PDP-11 unit names dl0/dl1 (RL02) and
+    // dx0/dx1 (RX02). Internally we still index by char 'a'..'d' to
+    // keep the slot-array indexing in vpdp1140.ino simple.
+    if      (key == "dl0")      cfg.disk_a = val;
+    else if (key == "dl1")      cfg.disk_b = val;
+    else if (key == "dx0")      cfg.disk_c = val;
+    else if (key == "dx1")      cfg.disk_d = val;
+    else if (key == "boot") {
+      String v = to_lower(val);
+      if      (v == "dl0" || v == "0")  cfg.boot_drive = 'a';
+      else if (v == "dl1" || v == "1")  cfg.boot_drive = 'b';
+      else if (v == "dx0" || v == "2")  cfg.boot_drive = 'c';
+      else if (v == "dx1" || v == "3")  cfg.boot_drive = 'd';
+      else if (v.length() == 1 && v[0] >= 'a' && v[0] <= 'd')
+        cfg.boot_drive = v[0];           // legacy single-char form
+      else
+        cfg.boot_drive = 'a';
+    }
   }
 }
 
@@ -172,13 +185,19 @@ bool config_write_defaults(const AppConfig& cfg) {
   f.printf("port    = %d\r\n", cfg.telnet_port);
   f.println();
   f.println("[disks]");
-  f.println("; a, b = 1.44 MB floppy images.   c, d = 32 MB HDD images.");
+  f.println("; dl0, dl1 = RL02 10 MB removable disk packs.");
+  f.println("; dx0, dx1 = RX02 512 KB double-density floppies.");
   f.println("; Leave a slot blank to dismount it at boot.");
-  f.printf("a    = %s\r\n", cfg.disk_a.c_str());
-  f.printf("b    = %s\r\n", cfg.disk_b.c_str());
-  f.printf("c    = %s\r\n", cfg.disk_c.c_str());
-  f.printf("d    = %s\r\n", cfg.disk_d.c_str());
-  f.printf("boot = %c\r\n", cfg.boot_drive);
+  f.printf("dl0  = %s\r\n", cfg.disk_a.c_str());
+  f.printf("dl1  = %s\r\n", cfg.disk_b.c_str());
+  f.printf("dx0  = %s\r\n", cfg.disk_c.c_str());
+  f.printf("dx1  = %s\r\n", cfg.disk_d.c_str());
+  // Friendly boot value: dl0/dl1/dx0/dx1
+  const char* boot_name = (cfg.boot_drive == 'a') ? "dl0"
+                        : (cfg.boot_drive == 'b') ? "dl1"
+                        : (cfg.boot_drive == 'c') ? "dx0"
+                        : (cfg.boot_drive == 'd') ? "dx1" : "dl0";
+  f.printf("boot = %s\r\n", boot_name);
   f.close();
   LOG("Wrote default %s", CFG_PATH);
   return true;
@@ -252,9 +271,13 @@ void config_print(const AppConfig& cfg) {
       (int)cfg.wifi_password.length());
   LOG("[telnet]  enabled=%s  port=%d",
       cfg.telnet_enabled ? "true" : "false", cfg.telnet_port);
-  LOG("[disks]   a=\"%s\"  b=\"%s\"",
+  const char* boot_name = (cfg.boot_drive == 'a') ? "dl0"
+                        : (cfg.boot_drive == 'b') ? "dl1"
+                        : (cfg.boot_drive == 'c') ? "dx0"
+                        : (cfg.boot_drive == 'd') ? "dx1" : "?";
+  LOG("[disks]   dl0=\"%s\"  dl1=\"%s\"",
       cfg.disk_a.c_str(), cfg.disk_b.c_str());
-  LOG("          c=\"%s\"  d=\"%s\"  boot=%c",
-      cfg.disk_c.c_str(), cfg.disk_d.c_str(), cfg.boot_drive);
+  LOG("          dx0=\"%s\"  dx1=\"%s\"  boot=%s",
+      cfg.disk_c.c_str(), cfg.disk_d.c_str(), boot_name);
   LOG("--------------------------------------");
 }

@@ -303,7 +303,10 @@ static void ADD(uint16_t instr)
     {
         PS |= FLAGV;
     }
-    if ((val1 + val2) >= 0xFFFF)
+    // C is the carry-out of the 16-bit unsigned add. It must be set only
+    // when the true sum exceeds 0xFFFF, NOT when it equals 0xFFFF (which
+    // is the largest representable 16-bit value, no overflow).
+    if (((uint32_t)val1 + (uint32_t)val2) > 0xFFFFu)
     {
         PS |= FLAGC;
     }
@@ -327,7 +330,13 @@ static void SUB(uint16_t instr)
     {
         PS |= FLAGN;
     }
-    if (((val1 ^ val2) & 0x8000) && (!((val2 ^ uval) & 0x8000)))
+    // SUB V: set when src and dst have OPPOSITE signs AND dst and result
+    // have opposite signs. Sam11's stock check had `!` in front of the
+    // second clause, which inverts it - V was set only when dst and
+    // result had the SAME sign, exactly when V should be 0. XXDP FKAAC0
+    // ran SES / CLV / SUB #077777, R0 with R0=0100000 and BVC'd into the
+    // failure HALT because of this.
+    if (((val1 ^ val2) & 0x8000) && ((val2 ^ uval) & 0x8000))
     {
         PS |= FLAGV;
     }
@@ -385,7 +394,10 @@ static void MUL(uint16_t instr)
         PS |= FLAGN;
     }
     setZ((sval & 0xFFFFFFFF) == 0);
-    if ((sval < 0x8000) || (sval >= 0x7FFF))  // if ((sval < (1 << 15)) || (sval >= ((1 << 15) - 1)))
+    // C set when the signed 32-bit product can't be represented in 16
+    // bits (i.e., product < -0x8000 or product > 0x7FFF). Sam11's mix
+    // of unsigned / off-by-one boundaries set C on most products.
+    if (sval < -0x8000 || sval > 0x7FFF)
     {
         PS |= FLAGC;
     }
@@ -603,7 +615,15 @@ static void INC(uint16_t instr)
     PS &= 0xFFF1;
     if (uval & msb)
     {
-        PS |= FLAGN | FLAGV;
+        PS |= FLAGN;
+    }
+    // V: set only on overflow from 0x7FFF -> 0x8000 (word) or 0x7F -> 0x80
+    // (byte). Sam11's stock code OR'd FLAGV unconditionally with FLAGN,
+    // which fails XXDP FKAAC0's PS-flag checks.  Matched to _DEC's
+    // mirror condition (V on uval==maxp).
+    if (uval == msb)
+    {
+        PS |= FLAGV;
     }
     setZ(uval == 0);
     memwrite(da, l, uval);
@@ -654,7 +674,10 @@ static void NEG(uint16_t instr)
     {
         PS |= FLAGC;
     }
-    if (sval == 0x8000)
+    // V is set only when result == msb (the one value whose 2's-complement
+    // negation can't be represented). Sam11 hardcoded 0x8000 which broke
+    // NEGB (byte mode); use the size-appropriate msb instead.
+    if (sval == msb)
     {
         PS |= FLAGV;
     }
@@ -678,11 +701,13 @@ static void _ADC(uint16_t instr)
             PS |= FLAGN;
         }
         setZ(uval == max);
-        if (uval == 0077777)
+        // V: pre-add value == max-positive (uval+1 wraps + -> -)
+        if (uval == (uint16_t)(msb - 1))
         {
             PS |= FLAGV;
         }
-        if (uval == 0177777)
+        // C: pre-add value == max (uval+1 wraps to 0 producing carry)
+        if (uval == max)
         {
             PS |= FLAGC;
         }
@@ -716,11 +741,18 @@ static void SBC(uint16_t instr)
             PS |= FLAGN;
         }
         setZ(sval == 1);
-        if (sval)
+        // C: real PDP-11 SBC sets C only when a borrow ACTUALLY occurred,
+        // i.e. dst was 0 with Cin=1.  The DEC handbook's "set otherwise"
+        // wording is the source of much confusion; sam11 followed it
+        // literally and inverted the bit on every common case.  XXDP
+        // FKAAC0 verifies this with `SBC R0 / BCS failure` where R0=1,
+        // Cin=1 (no borrow, C must be 0).
+        if (sval == 0)
         {
             PS |= FLAGC;
         }
-        if (sval == 0100000)
+        // V set when pre-sub value == msb (sval-1 goes from min-neg to max-pos)
+        if ((uint16_t)sval == msb)
         {
             PS |= FLAGV;
         }
@@ -728,17 +760,18 @@ static void SBC(uint16_t instr)
     }
     else
     {
+        // Cin = 0 -> no subtraction occurs, no borrow can be generated.
+        // C must end up cleared.  Sam11 set it unconditionally here.
         PS &= 0xFFF0;
         if (sval & msb)
         {
             PS |= FLAGN;
         }
         setZ(sval == 0);
-        if (sval == 0100000)
+        if ((uint16_t)sval == msb)
         {
             PS |= FLAGV;
         }
-        PS |= FLAGC;
     }
 }
 
@@ -758,34 +791,33 @@ static void TST(uint16_t instr)
 }
 
 // Rotate right
+//
+// Sam11's original ROR computed Z from the pre-shift value (sval & max),
+// which is wrong - Z must reflect the post-shift result.  This rewrite
+// shifts first, then computes flags, which also makes the V (= N XOR C)
+// calculation read directly off the new N and new C bits.
 static void ROR(uint16_t instr)
 {
-    uint8_t d = instr & 077;
-    uint8_t l = 2 - (instr >> 15);
-    int32_t max = l == 2 ? 0xFFFF : 0xff;
-    uint16_t da = aget(d, l);
-    int32_t sval = memread(da, l);
-    if (PS & FLAGC)
-    {
-        sval |= max + 1;
-    }
+    uint8_t  d      = instr & 077;
+    uint8_t  l      = 2 - (instr >> 15);
+    uint32_t max    = (l == 2) ? 0xFFFFu : 0xFFu;
+    uint32_t hibit  = (max + 1) >> 1;          // 0x8000 (word) or 0x80 (byte)
+    uint16_t da     = aget(d, l);
+    uint32_t input  = memread(da, l) & max;
+
+    bool old_c = (PS & FLAGC) != 0;
+    bool new_c = (input & 1) != 0;
+
+    uint32_t result = input >> 1;
+    if (old_c) result |= hibit;                // old C rotates into new MSB
+
     PS &= 0xFFF0;
-    if (sval & 1)
-    {
-        PS |= FLAGC;
-    }
-    // watch out for integer wrap around
-    if (sval & (max + 1))
-    {
-        PS |= FLAGN;
-    }
-    setZ(!(sval & max));
-    if ((sval & 1) xor (sval & (max + 1)))
-    {
-        PS |= FLAGV;
-    }
-    sval >>= 1;
-    memwrite(da, l, sval);
+    if (new_c)               PS |= FLAGC;
+    if (result & hibit)      PS |= FLAGN;
+    if ((result & max) == 0) PS |= FLAGZ;
+    if (new_c != old_c)      PS |= FLAGV;      // V = N XOR C (post-shift)
+
+    memwrite(da, l, result);
 }
 
 // Rotate left
@@ -836,7 +868,11 @@ static void ASR(uint16_t instr)
     {
         PS |= FLAGN;
     }
-    if ((uval & msb) xor (uval & 1))
+    // V = N XOR C (post-shift). Sam11's XOR of (uval & msb) (= 0x8000) and
+    // (uval & 1) (= 0 or 1) treats them as integers, so the XOR is non-zero
+    // whenever EITHER bit is set instead of only when they differ - fails
+    // the case where both MSB and LSB are 1 (V should be 0, sam11 says 1).
+    if (((uval & msb) != 0) != ((uval & 1) != 0))
     {
         PS |= FLAGV;
     }
@@ -874,20 +910,33 @@ static void ASL(uint16_t instr)
 }
 
 // Sign extend
+//
+// PDP-11/40 SXT: dst <- 0 if N=0; dst <- -1 if N=1.
+// Flag effects per handbook:
+//   N: not affected
+//   Z: 1 if dst becomes 0 (i.e. if N was 0); 0 otherwise
+//   V: cleared
+//   C: not affected
+//
+// Sam11's stock SXT only set Z on the "result == 0" path and never
+// cleared V.  XXDP FKAAC0 sets PS=NVC=013, then SXT R0, then BVS to
+// the failure HALT - V must be cleared by SXT for the test to pass.
 static void SXT(uint16_t instr)
 {
     uint8_t d = instr & 077;
     uint8_t l = 2 - (instr >> 15);
     uint16_t max = l == 2 ? 0xFFFF : 0xff;
     uint16_t da = aget(d, l);
+    PS &= ~FLAGV;                  // V always cleared
     if (PS & FLAGN)
     {
         memwrite(da, l, max);
+        PS &= ~FLAGZ;              // result is -1, not zero
     }
     else
     {
-        PS |= FLAGZ;
         memwrite(da, l, 0);
+        PS |= FLAGZ;               // result is 0
     }
 }
 
@@ -909,6 +958,11 @@ static void JMP(uint16_t instr)
 }
 
 // Swap bytes
+//
+// Sam11's setZ(uval & 0xFF) was inverted - Z should be set when the
+// LOW BYTE of the swapped result is ZERO, not when it is non-zero.
+// XXDP FKAAC0 sequences SES / CLN / SWAB / BLOS, which depends on a
+// correct Z to decide between the pass path and the failure HALT.
 static void SWAB(uint16_t instr)
 {
     uint8_t d = instr & 077;
@@ -917,7 +971,7 @@ static void SWAB(uint16_t instr)
     uint16_t uval = memread(da, l);
     uval = ((uval >> 8) | (uval << 8)) & 0xFFFF;
     PS &= 0xFFF0;
-    setZ(uval & 0xFF);
+    setZ((uval & 0xFF) == 0);
     if (uval & 0x80)
     {
         PS |= FLAGN;

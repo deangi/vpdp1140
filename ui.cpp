@@ -115,23 +115,30 @@ static void rebuild() {
       break;
     case SC_DRIVES:
       strcpy(g_title, "Drives");
-      for (int s = 0; s < 4; s++) {
-        if (disk_is_mounted(s))
-          snprintf(g_items[g_count++], 44, "%c: %s%s", 'A' + s, disk_path(s),
-                   disk_is_readonly(s) ? " [RO]" : "");
-        else
-          snprintf(g_items[g_count++], 44, "%c: (empty)", 'A' + s);
+      {
+        static const char* const ui_unit_names[4] = { "DL0", "DL1", "DX0", "DX1" };
+        for (int s = 0; s < 4; s++) {
+          if (disk_is_mounted(s))
+            snprintf(g_items[g_count++], 44, "%s %s%s", ui_unit_names[s],
+                     disk_path(s),
+                     disk_is_readonly(s) ? " [RO]" : "");
+          else
+            snprintf(g_items[g_count++], 44, "%s (empty)", ui_unit_names[s]);
+        }
       }
       break;
-    case SC_DRIVE:
-      snprintf(g_title, sizeof(g_title), "Drive %c:", 'A' + g_sel);
+    case SC_DRIVE: {
+      static const char* const drv_unit_names[4] = { "DL0", "DL1", "DX0", "DX1" };
+      snprintf(g_title, sizeof(g_title), "Drive %s", drv_unit_names[g_sel]);
       strcpy(g_items[g_count++],
              disk_is_mounted(g_sel) ? "Change Image" : "Mount Image");
       if (disk_is_mounted(g_sel))
         strcpy(g_items[g_count++], "Dismount");
       break;
-    case SC_PICKER:
-      snprintf(g_title, sizeof(g_title), "Mount into %c:", 'A' + g_sel);
+    }
+    case SC_PICKER: {
+      static const char* const pick_unit_names[4] = { "DL0", "DL1", "DX0", "DX1" };
+      snprintf(g_title, sizeof(g_title), "Mount into %s", pick_unit_names[g_sel]);
       // Item 0 always offers creating a new blank image of the right type.
       strcpy(g_items[g_count++],
              (g_sel >= DRIVE_C) ? "[+] Create New 32MB HDD"
@@ -139,6 +146,7 @@ static void rebuild() {
       for (int i = 0; i < g_file_count; i++)
         strncpy(g_items[g_count++], g_files[i], 43);
       break;
+    }
     case SC_BRIGHT:
       snprintf(g_title, sizeof(g_title), "Brightness  %d%%",
                (g_bright * 100) / 255);

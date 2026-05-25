@@ -41,6 +41,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <Arduino.h>
 
+// vpdp1140 m2: KL11 is routed through the v8088-inherited host scaffolding
+// so guest TTY output appears on the TFT 80x25 grid AND any Telnet client
+// AND USB-Serial, and guest TTY input is fed from any of those sources.
+#include "console.h"
+#include "telnet.h"
+
 #if USE_11_45
 #define procNS kb11
 #else
@@ -105,66 +111,48 @@ uint8_t count;
 
 void poll()
 {
-    // Read
-    if (Serial.available())
+    // Read: drain one byte from the host key queue if available.
+    // vpdp1140.ino's loop() pushes USB-Serial bytes into this queue;
+    // telnet.cpp pushes bytes received from a connected client. So this
+    // single source fans in Serial + Telnet without duplicating work.
+    // (The original kl11.cpp's inline ESC -> 0x7F translation is gone for
+    // now; we can revive it via termopts.h if XXDP/RT-11 needs delete-
+    // key handling.)
+    // Only pull a new char if the guest has consumed the previous one
+    // (TKS bit 7 cleared by reading TKB). Otherwise queued bytes would
+    // overwrite each other in TKB between guest reads, and the guest
+    // would see only the last byte of any burst (CR or LF instead of
+    // the actual character typed).
+    if (!(TKS & 0x80))
     {
-        char c = Serial.read();
-
-        if ((c == '\n' || c == '\r'))
+        uint8_t c;
+        if (console_key_pop(&c))
         {
-            procNS::trapped |= VTRAP_ON_NL;
-            if (PRINTSIMLINES && procNS::trapped)
+            if (c == '\n' || c == '\r')
             {
-                Serial.println("\r\n%% Virtual Trap.");
+                procNS::trapped |= VTRAP_ON_NL;
             }
-        }
-
-#if ANSI_TO_ASCII
-        if (c == 0x1B)  // ESC
-        {
-            char b = Serial.read();
-            if (b == '[')
-            {
-                char d = Serial.read();
-                if (d == '3')
-                {
-                    char e = Serial.read();
-                    if (e == '~')
-                    {
-                        addchar(0x7F);
-                    }
-                    else
-                    {
-                        addchar(c & 0x7F);
-                        addchar(b & 0x7F);
-                        addchar(d & 0x7F);
-                        addchar(e & 0x7F);
-                    }
-                }
-                else
-                {
-                    addchar(c & 0x7F);
-                    addchar(b & 0x7F);
-                    addchar(d & 0x7F);
-                }
+            // DEBUG: announce first few input bytes that reach KL11.
+            static int dbg_in_left = 16;
+            if (dbg_in_left > 0) {
+                Serial.printf("[vpdp1140] KL11 in: 0x%02x '%c'  TKS=%06o\r\n",
+                              c, (c >= 0x20 && c < 0x7F) ? c : '.', TKS);
+                dbg_in_left--;
             }
-            else
-            {
-                addchar(c & 0x7F);
-                addchar(b & 0x7F);
-            }
-        }
-        else
-#endif
             addchar(c & 0x7F);
+        }
     }
 
-    // Write
+    // Write: when the guest puts a char in TPB, count up 32 polls (mimics
+    // a baud-rate-limited UART) then fan out to all three host channels.
     if ((TPS & 0x80) == 0)
     {
         if (++count > 32)
         {
-            Serial.write(TPB & 0x7f);  // the & 0x7f removes the parity bit, all characters should be 7-bit anyway.
+            uint8_t out = TPB & 0x7f;  // strip parity bit
+            console_feed(out);          // TFT 80x25 grid
+            telnet_write(out);          // any connected telnet client
+            Serial.write(out);          // USB-Serial monitor
             TPS |= 0x80;
             if (TPS & (1 << 6))
             {
@@ -183,7 +171,9 @@ uint16_t read16(uint32_t a)
     case DEV_CONSOLE_TTY_IN_DATA:
         if (TKS & 0x80)
         {
-            TKS &= 0xff7e;
+            // Clear only bit 7 (RX done); bit 0 is the reader-enable
+            // flag which is set by software, not by reading TKB.
+            TKS &= 0xff7f;
             return TKB;
         }
         return 0;

@@ -9,3 +9,9 @@ build/
 
 # Plan / scratch
 *.tmp
+
+# Disk images - keep local copies but don't bloat git with multi-MB binaries.
+DiskImages/
+*.dsk
+*.hdd
+*.img

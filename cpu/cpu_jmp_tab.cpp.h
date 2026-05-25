@@ -180,7 +180,16 @@ case 0000200:  // RTS and SPL; 00020R and 00023N
                     }
                     else
                     {
-                        PS &= ~instr & 017;
+                        // Precedence bug in sam11's stock code: the
+                        // original `PS &= ~instr & 017` is parsed as
+                        // `PS &= ((~instr) & 017)` and clears whichever
+                        // of the low four bits are NOT specified in
+                        // instr.  CCC (0o257) would compute PS &= 0,
+                        // wiping the priority bits along with N/Z/V/C.
+                        // We want PS &= ~(instr & 017) so only the
+                        // bits selected by the low 4 of instr are
+                        // cleared.
+                        PS &= ~(instr & 017);
                     }
                     return;
                 }
@@ -272,7 +281,10 @@ case 0006300:  // ASL 0063DD
     return;
 case 0006400:  // MARK 0064DD
     MARK(instr);
-    break;
+    return;       // sam11 stock had `break` here, which dropped through
+                  //  to the trailing longjmp(INTINVAL) at end of step(),
+                  //  causing every MARK to fault and land in the trap
+                  //  handler instead of returning via R5.
 case 0006500:  // MFPI 0065DD
     MFPI(instr);
     return;

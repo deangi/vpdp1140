@@ -43,6 +43,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "lp11.h"
 #include "ms11.h"
 #include "rk11.h"
+#include "rl11.h"
 #include "sam11.h"
 #include "xmem.h"
 
@@ -262,6 +263,14 @@ void write16(uint32_t a, uint16_t v)
         rk11::write16(a, v);
         return;
 
+    case DEV_RL_CS:
+    case DEV_RL_BS:
+    case DEV_RL_DA:
+    case DEV_RL_MP:
+    case DEV_RL_BAE:
+        rl11::write16(a, v);
+        return;
+
     case DEV_CONSOLE_TTY_OUT_DATA:
     case DEV_CONSOLE_TTY_OUT_STATUS:
     case DEV_CONSOLE_TTY_IN_DATA:
@@ -408,6 +417,14 @@ uint16_t read16(uint32_t a)
     case DEV_RK_DB:
     case DEV_RK_MR:
         readReturn rk11::read16(a);
+        break;
+
+    case DEV_RL_CS:
+    case DEV_RL_BS:
+    case DEV_RL_DA:
+    case DEV_RL_MP:
+    case DEV_RL_BAE:
+        readReturn rl11::read16(a);
         break;
 
     case DEV_CONSOLE_TTY_OUT_DATA:

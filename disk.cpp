@@ -38,15 +38,20 @@ bool disk_mount(int slot, const char* path) {
   }
   uint32_t sz = (uint32_t)f.size();
 
-  bool is_hdd = (slot == DRIVE_C || slot == DRIVE_D);
-  uint32_t want = is_hdd ? HD_BYTES : FD_BYTES;
-  if (sz != want) {
-    LOGE("disk_mount[%d]: %s is %u bytes, expected %u (%s)",
-         slot, path, (unsigned)sz, (unsigned)want,
-         is_hdd ? "HDD" : "floppy");
+  // PDP-11 era disk images come in many sizes (RL01 = 5 MB, RL02 = 10 MB,
+  // RX01 = 256 KB, RX02 = 512 KB, RK05 = 2.5 MB ...) and some carry small
+  // SimH-style headers. Accept anything between 100 KB and 32 MB; the
+  // RL11 / RK11 / RX11 emulators are responsible for sanity-checking
+  // offsets against the slot's actual size.
+  const uint32_t MIN_IMAGE = 100u * 1024u;
+  const uint32_t MAX_IMAGE = 32u * 1024u * 1024u;
+  if (sz < MIN_IMAGE || sz > MAX_IMAGE) {
+    LOGE("disk_mount[%d]: %s is %u bytes, out of range [%u..%u]",
+         slot, path, (unsigned)sz, (unsigned)MIN_IMAGE, (unsigned)MAX_IMAGE);
     f.close();
     return false;
   }
+  bool is_hdd = (slot == DRIVE_C || slot == DRIVE_D);
 
   g_drv[slot].file     = f;
   g_drv[slot].mounted  = true;
