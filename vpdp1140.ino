@@ -472,8 +472,10 @@ void loop() {
         (unsigned)cpu_reg16(6),
         (unsigned)cpu_psw(),
         (unsigned)cpu_inst_count());
-    // Also dump the last 32 instructions so we can spot tight loops.
-    cpu_dump_trace(32);
+    // cpu_dump_trace() is available if you need it for stuck-in-loop
+    // diagnosis - the cpu_pdp11.h function dumps the last N entries of
+    // the trace ring. We leave it off by default so the serial console
+    // stays usable for the guest OS.
   }
 
   // WiFi health check (~0.1 Hz).
