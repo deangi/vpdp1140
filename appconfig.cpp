@@ -57,6 +57,7 @@ void config_apply_compiled_defaults(AppConfig& cfg) {
   cfg.telnet_port    = TELNET_PORT;
 
   cfg.diag_pcping_sec = 5;
+  cfg.v4b_quirks      = true;
 
   cfg.disk_a        = DEFAULT_A_IMG;
   cfg.disk_b        = "";
@@ -106,7 +107,11 @@ static void parse_line(AppConfig& cfg, String& section, const String& raw) {
   } else if (section == "diag" || section == "emu") {
     // "emu" kept as an alias for back-compat with the first revision of
     // the parser; "diag" is the canonical section going forward.
-    if      (key == "pcping")   cfg.diag_pcping_sec = val.toInt();
+    if      (key == "pcping")     cfg.diag_pcping_sec = val.toInt();
+    else if (key == "v4b_quirks") cfg.v4b_quirks = (val.equalsIgnoreCase("true") ||
+                                                   val == "1" ||
+                                                   val.equalsIgnoreCase("yes") ||
+                                                   val.equalsIgnoreCase("on"));
   } else if (section == "disks") {
     // Drive slot 0..3 maps to PDP-11 unit names dl0/dl1 (RL02) and
     // dx0/dx1 (RX02). Internally we still index by char 'a'..'d' to
@@ -199,9 +204,15 @@ bool config_write_defaults(const AppConfig& cfg) {
   f.printf("port    = %d\r\n", cfg.telnet_port);
   f.println();
   f.println("[diag]");
-  f.println("; pcping = seconds between host's periodic PC/register dump");
-  f.println(";          to USB-Serial. 0 disables it (so do large values).");
-  f.printf("pcping = %d\r\n", cfg.diag_pcping_sec);
+  f.println("; pcping     = seconds between host's periodic PC/register dump");
+  f.println(";              to USB-Serial. 0 disables it (so do large values).");
+  f.println("; v4b_quirks = absorb KE11-A (0o772100..0o772176) and TT1");
+  f.println(";              (0o776500..0o776516) probes silently. Default");
+  f.println(";              true makes RSTS/E V4B + RT-11 + V6 + XXDP boot;");
+  f.println(";              set false to attempt RSTS/E V7 (V4B will not");
+  f.println(";              boot in that mode).");
+  f.printf("pcping     = %d\r\n", cfg.diag_pcping_sec);
+  f.printf("v4b_quirks = %s\r\n", cfg.v4b_quirks ? "true" : "false");
   f.println();
   f.println("[disks]");
   f.println("; dl0, dl1 = RL02 10 MB removable disk packs.");
@@ -295,8 +306,10 @@ void config_print(const AppConfig& cfg) {
       (int)cfg.wifi_password.length());
   LOG("[telnet]  enabled=%s  port=%d",
       cfg.telnet_enabled ? "true" : "false", cfg.telnet_port);
-  LOG("[diag]    pcping=%d sec%s",
-      cfg.diag_pcping_sec, cfg.diag_pcping_sec <= 0 ? " (disabled)" : "");
+  LOG("[diag]    pcping=%d sec%s  v4b_quirks=%s (%s)",
+      cfg.diag_pcping_sec, cfg.diag_pcping_sec <= 0 ? " (disabled)" : "",
+      cfg.v4b_quirks ? "true" : "false",
+      cfg.v4b_quirks ? "V4B/V6/RT-11/XXDP" : "V7-strict");
   const char* boot_name;
   if (cfg.boot_kind == AppConfig::BK_RK) boot_name = "rk0";
   else boot_name = (cfg.boot_drive == 'a') ? "dl0"

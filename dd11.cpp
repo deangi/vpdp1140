@@ -65,6 +65,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace dd11 {
 
+// Runtime gate for the V4B compat absorbs. Default true so V4B / V6 /
+// XXDP / RT-11 work out of the box; vpdp1140.ino flips it from
+// config.ini [diag] v4b_quirks at boot.
+bool v4b_quirks_enabled = true;
+
 uint16_t read8(const uint32_t a)
 {
 #if !KY_PANEL
@@ -307,23 +312,30 @@ void write16(uint32_t a, uint16_t v)
     }
 #endif
 
-    // Device-probe absorption ranges (RSTS V4B walks a table of CSRs
-    // and writes a tickle value to each; bus error = "not present").
-    // Absorbing writes silently + returning 0 on reads makes the OS see
-    // each device as "present but broken" and skip it. Ranges below
-    // all stay well clear of devices we actually emulate.
+    // Device-probe absorption ranges - gated by v4b_quirks_enabled
+    // ([diag] v4b_quirks in config.ini). RSTS V4B walks a table of CSRs
+    // and writes a tickle value to each; bus error = "not present".
+    // V4B's bus-error handler unconditionally HALTs, so we have to
+    // absorb the two known-V4B-probed ranges or V4B panics. Same
+    // absorbs are safe for V6 / XXDP / RT-11.
     //
-    // 0o772100..0o772176 - KE11-A EAE (Step Counter etc.)
-    // 0o776500..0o776516 - Second DL11 console (TT1: input/output regs)
-    // 0o770500..0o770776 - floating-CSR pool for extra async muxers
-    //                       (DJ11/DH11/DM11/DUP11/DV11), probed by RSTS V7
-    // 0o775200..0o775776 - floating-CSR pool above the RP11 region,
-    //                       probed by RSTS V7 (4-register device chain)
+    // 0o772100..0o772176 - KE11-A EAE (computational, no vector)
+    // 0o776500..0o776516 - Second DL11 console (TT1)
+    //
+    // For RSTS V7 the TT1 absorb backfires: V7 sees a phantom DL11,
+    // allocates it a floating vector, and critical devices (RK, RL)
+    // collide on the next vector and get disabled. Setting
+    // v4b_quirks=false in config.ini reverts to honest bus errors
+    // here so V7 can identify absent devices correctly.
+    //
+    // The broader floating-CSR pools (0o770500..0o770776 and
+    // 0o775200..0o775776) are never absorbed - RSTS V7's device
+    // count depends on those bus-erroring as "absent".
+    //
     // NOTE: 0o772540..0o772546 (KW11-P) is now a real device; see kwp.cpp.
-    if ((a >= 0772100 && a <= 0772176) ||
-        (a >= 0776500 && a <= 0776516) ||
-        (a >= 0770500 && a <= 0770776) ||
-        (a >= 0775200 && a <= 0775776)) {
+    if (v4b_quirks_enabled &&
+        ((a >= 0772100 && a <= 0772176) ||
+         (a >= 0776500 && a <= 0776516))) {
         return;
     }
 
@@ -505,10 +517,9 @@ uint16_t read16(uint32_t a)
 #endif
 
     // Device-probe absorption ranges: see write16 above.
-    if ((a >= 0772100 && a <= 0772176) ||
-        (a >= 0776500 && a <= 0776516) ||
-        (a >= 0770500 && a <= 0770776) ||
-        (a >= 0775200 && a <= 0775776)) {
+    if (v4b_quirks_enabled &&
+        ((a >= 0772100 && a <= 0772176) ||
+         (a >= 0776500 && a <= 0776516))) {
         return 0;
     }
 

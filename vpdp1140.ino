@@ -48,6 +48,7 @@
 #include "secrets.h"
 #include "appconfig.h"
 #include "cpu_pdp11.h"
+#include "dd11.h"  // dd11::v4b_quirks_enabled gate
 #include "disk.h"
 #include "console.h"
 #include "telnet.h"
@@ -190,6 +191,11 @@ static void sd_and_config_init() {
                existed ? TFT_GREEN : TFT_YELLOW);
   }
   config_print(cfg);
+
+  // Push the V4B-quirks flag down to dd11 so its probe-absorb ranges
+  // honor what config.ini said. Must happen before cpu_reset() / any
+  // guest memory access.
+  dd11::v4b_quirks_enabled = cfg.v4b_quirks;
 
   // Show the boot drive's image path (e.g. "Boot DL0:" / "Boot RK0:").
   char boot_label[16];

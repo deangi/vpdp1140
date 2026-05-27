@@ -85,6 +85,12 @@ union addr {
     uint32_t value;
 };
 
+// Controls whether the V4B-compatibility probe absorbs are active. When
+// true (default), reads/writes to KE11-A EAE (0o772100..0o772176) and
+// TT1 (0o776500..0o776516) are silently absorbed instead of generating
+// a bus error. Set false from vpdp1140.ino at boot for RSTS V7 mode.
+extern bool v4b_quirks_enabled;
+
 uint16_t read8(uint32_t addr);
 uint16_t read16(uint32_t addr);
 void write8(uint32_t a, uint16_t v);

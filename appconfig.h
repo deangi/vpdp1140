@@ -23,6 +23,18 @@ struct AppConfig {
   // capturing other output. Default 5.
   int    diag_pcping_sec = 5;
 
+  // [compat]
+  // V4B (RSTS/E V4B) requires its probe-by-write of two non-emulated
+  // device ranges to be silently absorbed in dd11 (KE11-A EAE at
+  // 0o772100..0o772176 and the second DL11 / TT1 at 0o776500..0o776516).
+  // Without absorbs, V4B's bus-error handler unconditionally HALTs.
+  // RSTS V7 is the opposite case: with the TT1 absorb V7's INIT.SYS
+  // sees a phantom DL11, allocates a floating vector for it, and later
+  // critical devices (RK, RL) collide on the next vector and disable.
+  // Default true (V4B + V6 + XXDP + RT-11 all work). Set to false to
+  // attempt RSTS V7; V4B will not boot in that mode.
+  bool   v4b_quirks = true;
+
   // [disks]
   // slot 0..3 holds whatever the host has mounted at DL0/DL1/DX0/DX1 -
   // RL controller sees them as RL02/RX02 packs.
