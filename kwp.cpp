@@ -48,6 +48,12 @@ uint16_t CSR  = 0;
 uint16_t CSB  = 0;
 uint16_t CNTR = 0;
 
+// Default off - vpdp1140.ino flips it from cfg.kwp_enabled at boot.
+// While false the module behaves as a pure absorber covering the
+// full 0o772540..0o772556 KW11-P address window so RSTS V4B's
+// device-probe sweep doesn't bus-error on the trailing addresses.
+bool enabled = false;
+
 // Instructions-per-CNTR-tick for each RATE field value (bits 1-2, 2-bit
 // field). The host clock runs at roughly 983 KHz (matches KW11-L's
 // LKS_PER = 16384 at a 60 Hz target), so the divisor for "real KW11-P
@@ -71,6 +77,7 @@ void reset()
 
 uint16_t read16(uint32_t a)
 {
+    if (!enabled) return 0;  // stub mode: every address in the window reads 0
     switch (a) {
         case DEV_KWP_CSR:  return CSR;
         case DEV_KWP_CSB:  return CSB;
@@ -82,6 +89,7 @@ uint16_t read16(uint32_t a)
 
 void write16(uint32_t a, uint16_t v)
 {
+    if (!enabled) return;  // stub mode: silently discard
     switch (a) {
         case DEV_KWP_CSR: {
             // GO bit transitioning to 1 (re)starts the counter from CSB.
@@ -108,6 +116,7 @@ void write16(uint32_t a, uint16_t v)
 
 void tick()
 {
+    if (!enabled) return;            // stub mode: no countdown, no IRQ
     if ((CSR & 0001) == 0) return;  // GO clear
 
     uint8_t rate = (CSR >> 1) & 0003;  // RATE = bits 1-2 (2-bit field)

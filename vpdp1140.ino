@@ -49,6 +49,7 @@
 #include "appconfig.h"
 #include "cpu_pdp11.h"
 #include "dd11.h"  // dd11::v4b_quirks_enabled gate
+#include "kwp.h"   // kwp::enabled gate
 #include "disk.h"
 #include "console.h"
 #include "telnet.h"
@@ -196,6 +197,7 @@ static void sd_and_config_init() {
   // honor what config.ini said. Must happen before cpu_reset() / any
   // guest memory access.
   dd11::v4b_quirks_enabled = cfg.v4b_quirks;
+  kwp::enabled             = cfg.kwp_enabled;
 
   // Show the boot drive's image path (e.g. "Boot DL0:" / "Boot RK0:").
   char boot_label[16];

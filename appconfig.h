@@ -35,6 +35,18 @@ struct AppConfig {
   // attempt RSTS V7; V4B will not boot in that mode.
   bool   v4b_quirks = true;
 
+  // KW11-P programmable real-time clock. When true the kwp.cpp device
+  // is fully active (CSR/CSB/CNTR live, ticks count down at the
+  // configured rate, raises INTRTC at BR5 on underflow). RSTS V7
+  // INIT.SYS's hardware test wants this so it stops printing
+  // "KW11-P doesn't work."; however when RSTS V4B's INIT detects a
+  // working KW11-P it programs it for interrupt-driven scheduling
+  // that breaks the terminal driver's case handling (typed upper
+  // case echoes as lower case). Default false: stub mode (reads
+  // return 0, writes absorbed, no interrupts) - matches V4B + V6 +
+  // RT-11 + XXDP. Set true only when trying to bring up RSTS V7.
+  bool   kwp_enabled = false;
+
   // [disks]
   // slot 0..3 holds whatever the host has mounted at DL0/DL1/DX0/DX1 -
   // RL controller sees them as RL02/RX02 packs.

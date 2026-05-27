@@ -225,10 +225,19 @@ void write16(uint32_t a, uint16_t v)
         kw11::LKS = v;
         return;
 
+    // Full 8-address KW11-P window. The 4 named registers map to live
+    // CSR/CSB/CNTR/unused; the trailing 4 are unused in any KW11-P spec
+    // I can find but RSTS V4B's probe sweep touches them, so route them
+    // to kwp::write16 too (which silently absorbs unknown offsets,
+    // matching the original V4B-friendly absorb range).
     case DEV_KWP_CSR:
     case DEV_KWP_CSB:
     case DEV_KWP_CNTR:
     case DEV_KWP:
+    case 0772550:
+    case 0772552:
+    case 0772554:
+    case 0772556:
         kwp::write16(a, v);
         return;
 
@@ -425,10 +434,15 @@ uint16_t read16(uint32_t a)
         readReturn kw11::LKS;
         break;
 
+    // Full KW11-P 8-address window; see write16 above.
     case DEV_KWP_CSR:
     case DEV_KWP_CSB:
     case DEV_KWP_CNTR:
     case DEV_KWP:
+    case 0772550:
+    case 0772552:
+    case 0772554:
+    case 0772556:
         readReturn kwp::read16(a);
         break;
 

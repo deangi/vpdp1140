@@ -17,6 +17,13 @@ extern uint16_t CSR;
 extern uint16_t CSB;
 extern uint16_t CNTR;
 
+// Runtime gate: when false the module is a pure absorber - all reads
+// in the 0o772540..0o772556 window return 0, writes are silently
+// discarded, tick() is a no-op. Required for RSTS V4B (a working
+// KW11-P breaks its terminal driver's case handling). Set by
+// vpdp1140.ino from cfg.kwp_enabled after config_load.
+extern bool enabled;
+
 void     reset();
 void     tick();
 uint16_t read16(uint32_t a);
