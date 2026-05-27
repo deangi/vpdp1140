@@ -38,6 +38,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "kd11.h"  // 11/40
 #include "sam11.h"
 #include "termopts.h"
+#include "platform.h"
 
 #include <Arduino.h>
 
@@ -145,7 +146,7 @@ void poll()
             uint8_t out = TPB & 0x7f;  // strip parity bit
             console_feed(out);          // TFT 80x25 grid
             telnet_write(out);          // any connected telnet client
-            Serial.write(out);          // USB-Serial monitor
+            if (!g_serial_silenced) Serial.write(out);  // USB-Serial monitor
             TPS |= 0x80;
             if (TPS & (1 << 6))
             {
@@ -177,7 +178,7 @@ uint16_t read16(uint32_t a)
     default:
         if (PRINTSIMLINES)
         {
-            Serial.println(F("%% kl11: read16 from invalid address"));  // " + ostr(a, 6))
+            if (!g_serial_silenced) Serial.println(F("%% kl11: read16 from invalid address"));  // " + ostr(a, 6))
             //panic();
         }
         return 0;
@@ -189,9 +190,17 @@ void write16(uint32_t a, uint16_t v)
     switch (a)
     {
     case DEV_CONSOLE_TTY_IN_STATUS:
+        // Real DL11: enabling IE while ready=1 (a queued char already
+        // present) fires the IRQ immediately. RT-11 SJ relies on this
+        // edge to kick its input handler.
         if (v & (1 << 6))
         {
+            bool was_off = (TKS & (1 << 6)) == 0;
             TKS |= 1 << 6;
+            if (was_off && (TKS & 0x80))
+            {
+                procNS::interrupt(INTTTYIN, 4);
+            }
         }
         else
         {
@@ -199,9 +208,18 @@ void write16(uint32_t a, uint16_t v)
         }
         break;
     case DEV_CONSOLE_TTY_OUT_STATUS:
+        // Real DL11: enabling IE while ready=1 (transmitter idle) fires
+        // the IRQ immediately so the output ISR can pull the first char
+        // from its buffer. Without this, RT-11 SJ's output buffer never
+        // starts draining and the console stays silent.
         if (v & (1 << 6))
         {
+            bool was_off = (TPS & (1 << 6)) == 0;
             TPS |= 1 << 6;
+            if (was_off && (TPS & 0x80))
+            {
+                procNS::interrupt(INTTTYOUT, 4);
+            }
         }
         else
         {
@@ -218,7 +236,7 @@ void write16(uint32_t a, uint16_t v)
     default:
         if (PRINTSIMLINES)
         {
-            Serial.println(F("%% kl11: write16 to invalid address"));  // " + ostr(a, 6))
+            if (!g_serial_silenced) Serial.println(F("%% kl11: write16 to invalid address"));  // " + ostr(a, 6))
             //panic();
         }
     }

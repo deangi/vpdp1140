@@ -56,6 +56,8 @@ void config_apply_compiled_defaults(AppConfig& cfg) {
   cfg.telnet_enabled = true;
   cfg.telnet_port    = TELNET_PORT;
 
+  cfg.diag_pcping_sec = 5;
+
   cfg.disk_a        = DEFAULT_A_IMG;
   cfg.disk_b        = "";
   cfg.disk_c        = DEFAULT_C_IMG;
@@ -101,6 +103,10 @@ static void parse_line(AppConfig& cfg, String& section, const String& raw) {
                                                      val.equalsIgnoreCase("yes") ||
                                                      val.equalsIgnoreCase("on"));
     else if (key == "port")     cfg.telnet_port = val.toInt();
+  } else if (section == "diag" || section == "emu") {
+    // "emu" kept as an alias for back-compat with the first revision of
+    // the parser; "diag" is the canonical section going forward.
+    if      (key == "pcping")   cfg.diag_pcping_sec = val.toInt();
   } else if (section == "disks") {
     // Drive slot 0..3 maps to PDP-11 unit names dl0/dl1 (RL02) and
     // dx0/dx1 (RX02). Internally we still index by char 'a'..'d' to
@@ -191,6 +197,11 @@ bool config_write_defaults(const AppConfig& cfg) {
   f.println("[telnet]");
   f.printf("enabled = %s\r\n", cfg.telnet_enabled ? "true" : "false");
   f.printf("port    = %d\r\n", cfg.telnet_port);
+  f.println();
+  f.println("[diag]");
+  f.println("; pcping = seconds between host's periodic PC/register dump");
+  f.println(";          to USB-Serial. 0 disables it (so do large values).");
+  f.printf("pcping = %d\r\n", cfg.diag_pcping_sec);
   f.println();
   f.println("[disks]");
   f.println("; dl0, dl1 = RL02 10 MB removable disk packs.");
@@ -284,6 +295,8 @@ void config_print(const AppConfig& cfg) {
       (int)cfg.wifi_password.length());
   LOG("[telnet]  enabled=%s  port=%d",
       cfg.telnet_enabled ? "true" : "false", cfg.telnet_port);
+  LOG("[diag]    pcping=%d sec%s",
+      cfg.diag_pcping_sec, cfg.diag_pcping_sec <= 0 ? " (disabled)" : "");
   const char* boot_name;
   if (cfg.boot_kind == AppConfig::BK_RK) boot_name = "rk0";
   else boot_name = (cfg.boot_drive == 'a') ? "dl0"

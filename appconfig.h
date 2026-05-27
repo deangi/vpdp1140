@@ -16,6 +16,13 @@ struct AppConfig {
   bool   telnet_enabled = true;
   int    telnet_port    = 23;
 
+  // [diag]
+  // Interval (seconds) for the host's periodic "state: PC=... R0=..." dump
+  // to USB-Serial. 0 disables it; large values (e.g. 9999) effectively do
+  // the same. Useful to set short for live debugging or to silence when
+  // capturing other output. Default 5.
+  int    diag_pcping_sec = 5;
+
   // [disks]
   // slot 0..3 holds whatever the host has mounted at DL0/DL1/DX0/DX1 -
   // RL controller sees them as RL02/RX02 packs.

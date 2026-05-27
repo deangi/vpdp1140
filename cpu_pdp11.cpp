@@ -22,6 +22,7 @@
 #include "ms11.h"
 #include "kl11.h"
 #include "kw11.h"
+#include "kwp.h"
 #include "rk11.h"
 #include "rl11.h"
 #include "ky11.h"
@@ -49,10 +50,24 @@ struct TraceEntry {
   uint16_t r[8];
   uint16_t ps;
 };
-#define TRACE_RING_SIZE 64
+#define TRACE_RING_SIZE 512
 static TraceEntry s_trace_ring[TRACE_RING_SIZE];
 static uint32_t   s_trace_idx = 0;  // next write slot
 static bool       s_trace_enable = true;
+
+// ---- ring of last N traps (synchronous: bus error, reserved instr, EMT,
+// TRAP, IOT, BPT, ...). Records the source PC and the new PC the vector
+// points at, so we can see WHICH vector fired and WHERE V4B's handler
+// for that vector lives. Dumped after the instruction trace on panic().
+struct TrapEntry {
+  uint16_t vec;
+  uint16_t pc_in;   // PC when the trap fired (R7 at setjmp return)
+  uint16_t pc_out;  // PC after trapat() loaded the vector
+  uint16_t sp;      // SP when the trap fired
+};
+#define TRAP_RING_SIZE 32
+static TrapEntry s_trap_ring[TRAP_RING_SIZE];
+static uint32_t  s_trap_idx = 0;
 
 // sam11 stubs (referenced only in PRINTSIMLINES / DEBUG paths, all
 // compile-time false in our build, but the symbols still need to exist).
@@ -66,7 +81,21 @@ void trap(uint16_t /*num*/) { /* deferred to sam11's own trap path */ }
 // out so the host loop can recover and continue running (instead of
 // deadlocking core 1).
 volatile bool g_panicked = false;
+volatile bool g_serial_silenced = false;
+static volatile bool s_panic_dumped = false;  // first panic-dump latch
 void panic() {
+  // Idempotent: only the FIRST panic emits the dump + trace ring. Any
+  // subsequent panic() call (recursive bus error, second trap during
+  // trap, second cpu_run on a still-broken state) just longjmps out
+  // silently so the captured trace stays clean on the monitor.
+  if (s_panic_dumped) {
+    g_panicked = true;
+    longjmp(trapbuf, 0);
+  }
+  s_panic_dumped = true;
+
+  // Print everything BEFORE we set g_serial_silenced. The LOGE / Serial.printf
+  // below would otherwise be gated by it.
   LOGE("PDP-11 panic: halted  PC=0%o  R0=0%o R1=0%o R2=0%o R3=0%o R4=0%o R5=0%o SP=0%o  PS=0%o",
        (unsigned)kd11::curPC,
        (unsigned)kd11::R[0], (unsigned)kd11::R[1], (unsigned)kd11::R[2],
@@ -85,8 +114,18 @@ void panic() {
   // Dump the last TRACE_RING_SIZE instructions leading up to the HALT.
   // s_trace_idx points at the next write slot, so the oldest valid
   // entry is at (s_trace_idx - TRACE_RING_SIZE) mod TRACE_RING_SIZE.
+  //
+  // ESP32-S3 USB-CDC has a per-write timeout (default ~100ms); on
+  // bursty output the host drains slower than we write, write() returns
+  // a short count, and bytes get silently dropped. Two defenses:
+  //   1) bump the TX timeout very high so write() *waits* for room
+  //      instead of giving up
+  //   2) flush() + brief sleep after every line so the host always has
+  //      a quiet moment to drain before we hit it again
+  Serial.setTxTimeoutMs(5000);
   Serial.printf("[vpdp1140]   --- last %d instructions before HALT ---\r\n",
                 TRACE_RING_SIZE);
+  Serial.flush();
   for (int n = TRACE_RING_SIZE; n > 0; n--) {
     uint32_t i = (s_trace_idx + TRACE_RING_SIZE - n) % TRACE_RING_SIZE;
     TraceEntry& e = s_trace_ring[i];
@@ -96,9 +135,35 @@ void panic() {
                   (unsigned)e.r[0], (unsigned)e.r[1], (unsigned)e.r[2],
                   (unsigned)e.r[3], (unsigned)e.r[4], (unsigned)e.r[5],
                   (unsigned)e.r[6], (unsigned)e.ps);
+    Serial.flush();
+    delay(2);
   }
+  // Dump the recent trap history. Each entry is "vector V from PC X
+  // diverted to PC Y" — useful for spotting which V4B handler we ended
+  // up in (e.g. INTBUS=04, INTINVAL=10, KW11=100, RK=220, RL=160).
+  Serial.printf("[vpdp1140]   --- last %d traps ---\r\n", TRAP_RING_SIZE);
+  Serial.flush();
+  for (int n = TRAP_RING_SIZE; n > 0; n--) {
+    uint32_t i = (s_trap_idx + TRAP_RING_SIZE - n) % TRAP_RING_SIZE;
+    TrapEntry& e = s_trap_ring[i];
+    if (e.vec == 0 && e.pc_in == 0) continue;
+    Serial.printf("  vec=%03o  from PC=%06o (SP=%06o) -> new PC=%06o\r\n",
+                  (unsigned)e.vec, (unsigned)e.pc_in,
+                  (unsigned)e.sp,  (unsigned)e.pc_out);
+    Serial.flush();
+    delay(2);
+  }
+  Serial.flush();
+
+  Serial.printf("[vpdp1140]   --- end panic dump, serial silenced ---\r\n");
 
   g_panicked = true;
+
+  // Silence all further USB-Serial output so the trace ring above is the
+  // last thing on the monitor and easy to capture. Reset in cpu_reset().
+  Serial.flush();
+  g_serial_silenced = true;
+
   // Bail out of step() via the trap path so cpu_run can return.
   longjmp(trapbuf, 0);
 }
@@ -147,6 +212,7 @@ void cpu_reset() {
   kd11::reset();
   rl11::reset();
   rk11::reset();
+  kwp::reset();
 
   // Install the chosen boot ROM at BOOT_START (02000 octal). kd11::reset()
   // installs bootrom_rk0 by default; we overwrite that region with either
@@ -215,6 +281,8 @@ void cpu_reset() {
       (unsigned)kd11::R[7]);
 
   g_panicked = false;
+  g_serial_silenced = false;
+  s_panic_dumped = false;
 
   // Clear the instruction-trace ring so the post-HALT dump shows only
   // entries from this run, not stale ones from the previous boot.
@@ -223,6 +291,15 @@ void cpu_reset() {
     s_trace_ring[i].instr = 0;
   }
   s_trace_idx = 0;
+
+  // Same for the trap ring.
+  for (int i = 0; i < TRAP_RING_SIZE; i++) {
+    s_trap_ring[i].vec = 0;
+    s_trap_ring[i].pc_in = 0;
+    s_trap_ring[i].pc_out = 0;
+    s_trap_ring[i].sp = 0;
+  }
+  s_trap_idx = 0;
 
   s_sam11_inited = true;
   s_halt_requested = false;
@@ -248,7 +325,18 @@ uint32_t cpu_run(uint32_t max_cycles) {
     return executed;
   }
   if (vec) {
+    // Record the trap BEFORE trapat() rewrites R7/SP so we know where it
+    // fired from. After trapat() runs we re-read R7 to know where the
+    // vector sent us. Helps diagnose "which handler did V4B install for X?"
+    uint16_t pc_in = kd11::R[7];
+    uint16_t sp_in = kd11::R[6];
     kd11::trapat(vec);
+    TrapEntry& te = s_trap_ring[s_trap_idx];
+    te.vec    = vec;
+    te.pc_in  = pc_in;
+    te.sp     = sp_in;
+    te.pc_out = kd11::R[7];
+    s_trap_idx = (s_trap_idx + 1) % TRAP_RING_SIZE;
     return executed;  // re-enter cpu_run() to install a fresh trapbuf
   }
 
@@ -274,6 +362,7 @@ uint32_t cpu_run(uint32_t max_cycles) {
     }
     kd11::step();
     kw11::tick();
+    kwp::tick();    // KW11-P programmable clock countdown
     rk11::tick();   // drives the deferred RK-done IRQ countdown
     kl11::poll();
     executed++;

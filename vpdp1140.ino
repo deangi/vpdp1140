@@ -100,12 +100,30 @@ static void tft_status(int row, const char* label, const char* value, uint16_t c
 //   row 0 = PSRAM
 //   row 1 = SD card
 //   row 2 = /config.ini
-//   row 3 = HDD C: image
+//   row 3 = boot drive image
 //   row 4 = WiFi
 //   row 5 = IP
 enum {
-  ROW_PSRAM = 0, ROW_SD, ROW_CFG, ROW_HDD, ROW_WIFI, ROW_IP, ROW_CPU
+  ROW_PSRAM = 0, ROW_SD, ROW_CFG, ROW_BOOT, ROW_WIFI, ROW_IP, ROW_CPU
 };
+
+// Boot drive unit label (e.g. "DL0", "DL1", "DX0", "DX1", "RK0") and the
+// configured image path for the slot named by cfg.boot_drive ('a'..'d').
+static const char* boot_unit_label() {
+  int slot = (cfg.boot_drive >= 'a' && cfg.boot_drive <= 'd')
+               ? (cfg.boot_drive - 'a') : 0;
+  static const char* rl_names[4] = { "DL0", "DL1", "DX0", "DX1" };
+  if (slot == 0 && cfg.boot_kind == AppConfig::BK_RK) return "RK0";
+  return rl_names[slot];
+}
+static const String& boot_image_path() {
+  int slot = (cfg.boot_drive >= 'a' && cfg.boot_drive <= 'd')
+               ? (cfg.boot_drive - 'a') : 0;
+  if (slot == 0 && cfg.boot_kind == AppConfig::BK_RK
+      && cfg.disk_rk0.length()) return cfg.disk_rk0;
+  const String* paths[4] = { &cfg.disk_a, &cfg.disk_b, &cfg.disk_c, &cfg.disk_d };
+  return *paths[slot];
+}
 
 static void wifi_connect() {
   const char* ssid = cfg.wifi_ssid.c_str();
@@ -173,17 +191,19 @@ static void sd_and_config_init() {
   }
   config_print(cfg);
 
-  // Ensure the C: HDD image exists (32 MB zeroed) if the path is non-empty.
-  tft_status(ROW_HDD, "HDD C: ", "checking...", TFT_YELLOW);
+  // Show the boot drive's image path (e.g. "Boot DL0:" / "Boot RK0:").
+  char boot_label[16];
+  snprintf(boot_label, sizeof(boot_label), "Boot %s:", boot_unit_label());
+  tft_status(ROW_BOOT, boot_label, "checking...", TFT_YELLOW);
+  const String& bpath = boot_image_path();
   if (!sd_ok) {
-    tft_status(ROW_HDD, "HDD C: ", "skipped (no SD)", TFT_DARKGREY);
-  } else if (cfg.disk_c.length() == 0) {
-    tft_status(ROW_HDD, "HDD C: ", "(dismounted)", TFT_DARKGREY);
+    tft_status(ROW_BOOT, boot_label, "skipped (no SD)", TFT_DARKGREY);
+  } else if (bpath.length() == 0) {
+    tft_status(ROW_BOOT, boot_label, "(no image)", TFT_RED);
   } else {
-    bool ok = ensure_disk_image(cfg.disk_c.c_str(), HD_BYTES, true, "HDC");
-    tft_status(ROW_HDD, "HDD C: ",
-               ok ? cfg.disk_c.c_str() : "FAILED",
-               ok ? TFT_GREEN : TFT_RED);
+    tft_status(ROW_BOOT, boot_label,
+               SD_MMC.exists(bpath) ? bpath.c_str() : "MISSING",
+               SD_MMC.exists(bpath) ? TFT_GREEN : TFT_RED);
   }
 }
 
@@ -354,7 +374,11 @@ void setup() {
   }
   tft_status(ROW_SD,   "SD:    ", "(pending)", TFT_DARKGREY);
   tft_status(ROW_CFG,  "Cfg:   ", "(pending)", TFT_DARKGREY);
-  tft_status(ROW_HDD,  "HDD C: ", "(pending)", TFT_DARKGREY);
+  {
+    char boot_label[16];
+    snprintf(boot_label, sizeof(boot_label), "Boot %s:", boot_unit_label());
+    tft_status(ROW_BOOT, boot_label, "(pending)", TFT_DARKGREY);
+  }
   tft_status(ROW_WIFI, "WiFi:  ", "(pending)", TFT_DARKGREY);
   tft_status(ROW_IP,   "IP:    ", "(none)",    TFT_DARKGREY);
   tft_status(ROW_CPU,  "CPU:   ", "(pending)", TFT_DARKGREY);
@@ -456,13 +480,14 @@ void loop() {
   telnet_poll();
 
 
-  // Once-per-five-seconds snapshot of guest CPU state - useful while
-  // bringing up disk/OS bootstrap. If PC stays put, the guest is stuck
-  // in a tight loop; if PC moves through a small window, it's a finite
-  // poll loop.
+  // Periodic snapshot of guest CPU state - useful while bringing up
+  // disk/OS bootstrap. If PC stays put, the guest is stuck in a tight
+  // loop; if PC moves through a small window, it's a finite poll loop.
+  // Rate is [diag] pcping in config.ini (seconds). 0 disables it.
   static uint32_t s_state_ms = 0;
   uint32_t s_now = millis();
-  if (s_now - s_state_ms >= 5000) {
+  if (cfg.diag_pcping_sec > 0 &&
+      s_now - s_state_ms >= (uint32_t)cfg.diag_pcping_sec * 1000U) {
     s_state_ms = s_now;
     LOG("state: PC=0%o R0=0%o R1=0%o R2=0%o R3=0%o R4=0%o R5=0%o SP=0%o PS=0%o inst=%u",
         (unsigned)cpu_pc(),

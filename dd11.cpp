@@ -39,6 +39,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "kl11.h"
 #include "kt11.h"
 #include "kw11.h"
+#include "kwp.h"
 #include "ky11.h"
 #include "lp11.h"
 #include "ms11.h"
@@ -46,6 +47,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rl11.h"
 #include "sam11.h"
 #include "xmem.h"
+#include "platform.h"  // for LOG, g_serial_silenced
 
 #if USE_11_45 && !STRICT_11_40
 #define procNS kb11
@@ -218,6 +220,13 @@ void write16(uint32_t a, uint16_t v)
         kw11::LKS = v;
         return;
 
+    case DEV_KWP_CSR:
+    case DEV_KWP_CSB:
+    case DEV_KWP_CNTR:
+    case DEV_KWP:
+        kwp::write16(a, v);
+        return;
+
     case DEV_MMU_SR0:
         kt11::SR0 = v;
         return;
@@ -298,11 +307,38 @@ void write16(uint32_t a, uint16_t v)
     }
 #endif
 
+    // Device-probe absorption ranges (RSTS V4B walks a table of CSRs
+    // and writes a tickle value to each; bus error = "not present").
+    // Absorbing writes silently + returning 0 on reads makes the OS see
+    // each device as "present but broken" and skip it. Ranges below
+    // all stay well clear of devices we actually emulate.
+    //
+    // 0o772100..0o772176 - KE11-A EAE (Step Counter etc.)
+    // 0o776500..0o776516 - Second DL11 console (TT1: input/output regs)
+    // 0o770500..0o770776 - floating-CSR pool for extra async muxers
+    //                       (DJ11/DH11/DM11/DUP11/DV11), probed by RSTS V7
+    // 0o775200..0o775776 - floating-CSR pool above the RP11 region,
+    //                       probed by RSTS V7 (4-register device chain)
+    // NOTE: 0o772540..0o772546 (KW11-P) is now a real device; see kwp.cpp.
+    if ((a >= 0772100 && a <= 0772176) ||
+        (a >= 0776500 && a <= 0776516) ||
+        (a >= 0770500 && a <= 0770776) ||
+        (a >= 0775200 && a <= 0775776)) {
+        return;
+    }
+
     if (PRINTSIMLINES)
     {
         Serial.print(F("%% dd11: write to invalid address 0"));
         Serial.println(a, OCT);
     }
+
+    // Diagnostic: log the trapping address with PC so we can see what
+    // V4B is probing. LOG is gated by g_serial_silenced so it'll quiet
+    // down once we panic; before that, every device-probe bus error
+    // prints one line. Cheap and very informative for the next probe.
+    LOG("dd11: WRITE bus-error trap @ %06o (val=%06o, PC=%06o)",
+        (unsigned)a, (unsigned)v, (unsigned)kd11::curPC);
 
     longjmp(trapbuf, INTBUS);
 }
@@ -375,6 +411,13 @@ uint16_t read16(uint32_t a)
 
     case DEV_KW_LKS:
         readReturn kw11::LKS;
+        break;
+
+    case DEV_KWP_CSR:
+    case DEV_KWP_CSB:
+    case DEV_KWP_CNTR:
+    case DEV_KWP:
+        readReturn kwp::read16(a);
         break;
 
     case DEV_MMU_SR0:
@@ -461,11 +504,24 @@ uint16_t read16(uint32_t a)
     return res;
 #endif
 
+    // Device-probe absorption ranges: see write16 above.
+    if ((a >= 0772100 && a <= 0772176) ||
+        (a >= 0776500 && a <= 0776516) ||
+        (a >= 0770500 && a <= 0770776) ||
+        (a >= 0775200 && a <= 0775776)) {
+        return 0;
+    }
+
     if (PRINTSIMLINES)
     {
         Serial.print(F("%% dd11: read from invalid address 0"));
         Serial.println(a, OCT);
     }
+
+    // Diagnostic: see write16 above.
+    LOG("dd11: READ bus-error trap @ %06o (PC=%06o)",
+        (unsigned)a, (unsigned)kd11::curPC);
+
     longjmp(trapbuf, INTBUS);
 }
 
