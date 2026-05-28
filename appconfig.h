@@ -23,6 +23,23 @@ struct AppConfig {
   // capturing other output. Default 5.
   int    diag_pcping_sec = 5;
 
+  // Per-byte LOG of every host-side character delivered into the KL11
+  // input register (TKB). Useful for diagnosing burst-input ordering
+  // bugs (e.g. a fast-typed line appearing reversed at the guest).
+  // The LOG line itself goes out USB-Serial and so will interleave with
+  // a guest echo on the same channel - read with both halves in mind.
+  // Default false.
+  bool   diag_tty_trace = false;
+
+  // Minimum host-side milliseconds between successive characters loaded
+  // into the KL11 receive buffer. Closes the burst-induced klrint re-
+  // entry window when a host terminal (Arduino IDE Serial Monitor,
+  // anything that sends a whole line at once) hands us several bytes
+  // in microseconds. 0 = no gating (immediate, instruction-rate). For
+  // V6 / RT-11 / RSTS guests under a line-buffered host, 10-50 ms is
+  // typical. Honoured by kl11::poll. Default 20.
+  int    diag_serialdelay_ms = 20;
+
   // [compat]
   // V4B (RSTS/E V4B) requires its probe-by-write of two non-emulated
   // device ranges to be silently absorbed in dd11 (KE11-A EAE at

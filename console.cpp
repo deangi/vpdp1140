@@ -2,9 +2,14 @@
 #include "config.h"
 #include "platform.h"
 #include "font4x8.h"
+#include "fifo.h"
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 #include <string.h>
+#include "esp_attr.h"
+#ifndef EXT_RAM_BSS_ATTR
+#define EXT_RAM_BSS_ATTR
+#endif
 
 // ---- 16-colour CGA palette in RGB565 ----
 static const uint16_t kPalette[16] = {
@@ -50,9 +55,16 @@ static int  csi_param[8];
 static int  csi_nparam = 0;
 static bool csi_has_digit = false;
 
-// ---- keyboard ring buffer ----
-static volatile uint8_t kb_buf[256];
-static volatile uint8_t kb_head = 0, kb_tail = 0;
+// ---- 8 KB serial-input FIFO (host USB-Serial -> KL11 TKB) and 8 KB
+//      TFT-output FIFO (KL11 TPB -> ANSI parser -> cell grid). Both live
+//      in PSRAM via EXT_RAM_BSS_ATTR; the indices stay in DRAM. Producer
+//      and consumer for both are on core 1 (loop()), so plain volatile
+//      head/tail is sufficient. ----
+#define VPDP_FIFO_BYTES 8192   // must be power of two
+EXT_RAM_BSS_ATTR static uint8_t serial_in_storage[VPDP_FIFO_BYTES];
+EXT_RAM_BSS_ATTR static uint8_t tft_out_storage[VPDP_FIFO_BYTES];
+static Fifo g_serial_in;
+static Fifo g_tft_out;
 
 // ---- output activity ----
 static uint32_t g_feed_count   = 0;
@@ -72,7 +84,8 @@ void console_init() {
   sr_top = 0; sr_bot = CON_ROWS - 1;
   ansi_st = ST_GROUND;
   shad_valid = false;
-  kb_head = kb_tail = 0;
+  g_serial_in.init(serial_in_storage, VPDP_FIFO_BYTES);
+  g_tft_out.init(tft_out_storage, VPDP_FIFO_BYTES);
 }
 
 void console_force_redraw() { shad_valid = false; }
@@ -200,7 +213,10 @@ static void exec_csi(uint8_t final) {
 }
 
 // -------------------------------------------------------------------------
-void console_feed(uint8_t c) {
+// Internal ANSI-parser entrypoint. Runs on core 1 from console_drain_tft().
+// Updates cell_ch/cell_at, which render_task on core 0 reads without a
+// lock (single-byte cells tolerate the race).
+static void feed_ansi(uint8_t c) {
   g_feed_count++;
   g_last_feed_ms = millis();
   switch (ansi_st) {
@@ -251,18 +267,22 @@ void console_feed(uint8_t c) {
   }
 }
 
-// ---- keyboard ----
-void console_key_push(uint8_t c) {
-  uint8_t next = (uint8_t)(kb_head + 1);
-  if (next != kb_tail) { kb_buf[kb_head] = c; kb_head = next; }
+// ---- TFT-out FIFO: KL11 push, main-loop drain ----
+// Public entrypoint kl11::poll() calls per output byte. Just buffers.
+void console_feed(uint8_t c) {
+  g_tft_out.push(c);          // drop-newest if full (sink falls behind)
 }
 
-int console_key_pop(uint8_t* out) {
-  if (kb_head == kb_tail) return 0;
-  *out = kb_buf[kb_tail];
-  kb_tail = (uint8_t)(kb_tail + 1);
-  return 1;
+// Drain pending TFT bytes through the ANSI parser. Called from loop() on
+// core 1 once per slice so the cell grid updates in roughly real time.
+void console_drain_tft() {
+  uint8_t b;
+  while (g_tft_out.pop(&b)) feed_ansi(b);
 }
+
+// ---- keyboard (host USB-Serial -> KL11 input FIFO) ----
+void console_key_push(uint8_t c) { g_serial_in.push(c); }
+int  console_key_pop(uint8_t* out) { return g_serial_in.pop(out) ? 1 : 0; }
 
 uint32_t console_feed_count()   { return g_feed_count; }
 uint32_t console_last_feed_ms() { return g_last_feed_ms; }

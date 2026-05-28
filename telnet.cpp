@@ -1,7 +1,12 @@
 #include "telnet.h"
 #include "console.h"
 #include "platform.h"
+#include "fifo.h"
 #include <WiFi.h>
+#include "esp_attr.h"
+#ifndef EXT_RAM_BSS_ATTR
+#define EXT_RAM_BSS_ATTR
+#endif
 
 // Telnet protocol bytes
 #define T_IAC   255
@@ -23,11 +28,26 @@ static bool        g_started = false;
 static uint16_t    g_port = 23;
 static char        g_client_ip[20] = {0};
 
-// Output is buffered so the CPU emulation never blocks on WiFi.
-static uint8_t  g_tx[4096];
-static uint32_t g_tx_len = 0;
+// 8 KB output FIFO (KL11 push, telnet_poll drain) and 8 KB input FIFO
+// (drain_rx push, kl11::poll pop). Both storages live in PSRAM via
+// EXT_RAM_BSS_ATTR. SPSC on core 1 - producer and consumer for each
+// FIFO both run inside loop(), so plain volatile head/tail is enough.
+#define VPDP_TELNET_FIFO_BYTES 8192   // must be power of two
+EXT_RAM_BSS_ATTR static uint8_t telnet_out_storage[VPDP_TELNET_FIFO_BYTES];
+EXT_RAM_BSS_ATTR static uint8_t telnet_in_storage[VPDP_TELNET_FIFO_BYTES];
+static Fifo g_telnet_out;
+static Fifo g_telnet_in;
+static bool g_fifos_inited = false;
+
+static void ensure_fifos_inited() {
+  if (g_fifos_inited) return;
+  g_telnet_out.init(telnet_out_storage, VPDP_TELNET_FIFO_BYTES);
+  g_telnet_in.init(telnet_in_storage,  VPDP_TELNET_FIFO_BYTES);
+  g_fifos_inited = true;
+}
 
 void telnet_begin(uint16_t port, bool enabled) {
+  ensure_fifos_inited();
   g_enabled = enabled;
   g_port    = port;
   if (!enabled) { LOG("telnet: disabled in config"); return; }
@@ -53,7 +73,7 @@ static void on_connect() {
   send_iac(T_WILL, OPT_SGA);
   send_iac(T_WONT, OPT_LINEMODE);
   send_iac(T_DO,   OPT_BINARY);
-  g_tx_len = 0;          // drop any stale output
+  g_telnet_out.clear();     // drop any stale output queued before connect
 }
 
 static void drain_rx() {
@@ -78,8 +98,12 @@ static void drain_rx() {
     }
     if (c == 0x00) continue;                // telnet CR NUL -> drop NUL
     if (c == 0x0A) continue;                // CR LF -> drop LF (CR kept)
-    console_key_push(c);
+    g_telnet_in.push(c);                    // drop-newest if 8 KB full
   }
+}
+
+bool telnet_in_pop(uint8_t* out) {
+  return g_telnet_in.pop(out);
 }
 
 void telnet_poll() {
@@ -100,25 +124,41 @@ void telnet_poll() {
 
   if (g_client && g_client.connected()) {
     drain_rx();
-    if (g_tx_len) {                         // flush queued console output
-      g_client.write(g_tx, g_tx_len);
-      g_tx_len = 0;
+    // Flush queued console output in contiguous chunks from the FIFO.
+    // peek() returns the largest run that doesn't wrap, so at most two
+    // calls are needed to drain the ring. We stop early if write() can't
+    // take everything we offered (socket buffer full); the rest stays
+    // queued for the next telnet_poll().
+    const uint8_t* p;
+    size_t n;
+    while ((n = g_telnet_out.peek(&p)) > 0) {
+      size_t w = g_client.write(p, n);
+      if (w == 0) break;
+      g_telnet_out.consume(w);
+      if (w < n) break;
     }
   } else if (g_client) {                    // client went away
     g_client.stop();
     g_client_ip[0] = 0;
-    g_tx_len = 0;
+    g_telnet_out.clear();
     LOG("telnet: client disconnected");
+  } else {
+    // No client connected at all: drop any queued output so it doesn't
+    // accumulate stale bytes that a future client would see on connect.
+    g_telnet_out.clear();
   }
 }
 
 void telnet_write(uint8_t c) {
-  if (!g_started || !(g_client && g_client.connected())) return;
-  // Escape IAC in the data stream; drop bytes if the buffer is full.
-  uint32_t need = (c == T_IAC) ? 2 : 1;
-  if (g_tx_len + need > sizeof(g_tx)) return;
-  g_tx[g_tx_len++] = c;
-  if (c == T_IAC) g_tx[g_tx_len++] = T_IAC;
+  // If telnet is disabled in config the FIFO would never drain, so
+  // drop bytes at the source. When enabled but no client is connected
+  // we still buffer; telnet_poll() then clears the FIFO each iteration
+  // so it never accumulates stale bytes a future client would see.
+  // IAC bytes in the data stream are escaped by emitting them twice
+  // (RFC 854). A full FIFO drops new bytes silently.
+  if (!g_started) return;
+  g_telnet_out.push(c);
+  if (c == T_IAC) g_telnet_out.push(T_IAC);
 }
 
 bool        telnet_connected() { return g_client && g_client.connected(); }

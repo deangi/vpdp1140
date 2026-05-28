@@ -39,12 +39,21 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "sam11.h"
 #include "termopts.h"
 #include "platform.h"
+#include "fifo.h"
 
 #include <Arduino.h>
+#include "esp_attr.h"
+#ifndef EXT_RAM_BSS_ATTR
+#define EXT_RAM_BSS_ATTR
+#endif
 
 // vpdp1140 m2: KL11 is routed through the v8088-inherited host scaffolding
 // so guest TTY output appears on the TFT 80x25 grid AND any Telnet client
 // AND USB-Serial, and guest TTY input is fed from any of those sources.
+// m11 (2026-05-28): each host channel sits behind an 8 KB FIFO so a
+// bursty guest (RT-11 DIR, V6 ls -l, type) can hand off output without
+// being throttled by the slowest sink, and the host RX path can absorb
+// fast-typed input without backpressuring the producers.
 #include "console.h"
 #include "telnet.h"
 
@@ -61,12 +70,55 @@ uint16_t TKB;
 uint16_t TPS;
 uint16_t TPB;
 
+// 8 KB KL11->USB-Serial FIFO. The TFT and Telnet sinks own their own
+// FIFOs inside console.cpp / telnet.cpp; this one stays here because
+// there's no "serial" module to put it in. Storage lives in PSRAM.
+#define VPDP_KL11_FIFO_BYTES 8192
+EXT_RAM_BSS_ATTR static uint8_t serial_out_storage[VPDP_KL11_FIFO_BYTES];
+static Fifo g_serial_out;
+static bool g_serial_out_inited = false;
+
+// Diagnostic flag (set from config.ini [diag] tty_trace). When true, every
+// byte that enters addchar() gets LOG'd along with a millisecond timestamp,
+// so the host operator can see the order the KL11 saw a burst of input.
+bool input_trace_enabled = false;
+
+// Inter-character delay (ms) between successive TKB loads (set from
+// [diag] serialdelay in config.ini). After each addchar we record the
+// host's millis(); the next byte can't enter TKB until at least this
+// many ms have elapsed. Closes the burst-induced klrint re-entry window
+// at the KL11 layer in an OS-agnostic way (no PSW priority inspection).
+// Default 0 = no delay; recommended 10-50 ms for interactive guests.
+uint32_t serial_in_delay_ms = 0;
+static uint32_t s_last_addchar_ms = 0;
+static bool     s_fifo_drained    = true;   // true at boot -> first char is immediate
+
 void reset()
 {
     TKS = 0;
     TPS = 1 << 7;
     TKB = 0;
     TPB = 0;
+    if (!g_serial_out_inited) {
+        g_serial_out.init(serial_out_storage, VPDP_KL11_FIFO_BYTES);
+        g_serial_out_inited = true;
+    }
+}
+
+void drain_serial_out()
+{
+    // Same chunked drain as telnet_poll: contiguous runs from the ring,
+    // up to whatever Serial.write() will take in one call. Serial.write
+    // on USB-CDC is generally non-blocking up to the host driver's buffer.
+    if (g_serial_silenced) { g_serial_out.clear(); return; }
+    const uint8_t* p;
+    size_t n;
+    while ((n = g_serial_out.peek(&p)) > 0) {
+        size_t w = Serial.write(p, n);
+        if (w == 0) break;
+        g_serial_out.consume(w);
+        if (w < n) break;
+    }
 }
 
 static void addchar(char c)
@@ -102,6 +154,15 @@ static void addchar(char c)
 #endif
 
     TKS |= 0x80;
+    if (input_trace_enabled) {
+        uint8_t pc = (uint8_t)(TKB & 0x7f);
+        LOG("kl11 in: 0x%02x %s%c%s  ms=%lu",
+            (unsigned)pc,
+            (pc >= 0x20 && pc < 0x7f) ? "'" : "",
+            (pc >= 0x20 && pc < 0x7f) ? pc  : '.',
+            (pc >= 0x20 && pc < 0x7f) ? "'" : "",
+            (unsigned long)millis());
+    }
     if (TKS & (1 << 6))
     {
         procNS::interrupt(INTTTYIN, 4);
@@ -112,41 +173,93 @@ uint8_t count;
 
 void poll()
 {
-    // Read: drain one byte from the host key queue if available.
-    // vpdp1140.ino's loop() pushes USB-Serial bytes into this queue;
-    // telnet.cpp pushes bytes received from a connected client. So this
-    // single source fans in Serial + Telnet without duplicating work.
-    // (The original kl11.cpp's inline ESC -> 0x7F translation is gone for
-    // now; we can revive it via termopts.h if XXDP/RT-11 needs delete-
-    // key handling.)
-    // Only pull a new char if the guest has consumed the previous one
-    // (TKS bit 7 cleared by reading TKB). Otherwise queued bytes would
-    // overwrite each other in TKB between guest reads, and the guest
-    // would see only the last byte of any burst (CR or LF instead of
-    // the actual character typed).
-    if (!(TKS & 0x80))
+    // Read: round-robin between the host's two input FIFOs (Serial via
+    // console_key_pop, Telnet via telnet_in_pop). Alternation happens
+    // only on a successful pop, so if just one source has data we drain
+    // it without skipped polls. Cross-source order can't be preserved
+    // (both clients type independently), but each source's own order is.
+    //
+    // Three-stage guard before loading TKB:
+    //  (a) bit 7 (RDONE) clear -> the guest has already read the prior
+    //      byte from TKB. Without this we'd overwrite TKB between reads.
+    //  (b) no INTTTYIN (vec 060) still pending in sam11's itab -> the
+    //      guest has actually taken the prior IRQ via handleinterrupt
+    //      (which pops it from itab).
+    //  (c) inter-character delay: at least serial_in_delay_ms ms have
+    //      elapsed since the last addchar. Without (c), a fast host-side
+    //      burst can queue the next INTTTYIN while klrint is still
+    //      running on the prior byte; sam11's IRQ check fires at >=
+    //      priority (not strictly >, as a real PDP-11 would), so the
+    //      second INTTTYIN re-enters klrint. The nested klrint saves
+    //      the in-progress R0 (which holds the first byte) to the
+    //      stack and reads the freshly-pushed TKB; V6's ttyinput()
+    //      then receives the bytes in LIFO order as the stack unwinds.
+    //      A small ms gap matches what a real serial line would have
+    //      enforced via baud-rate timing, and stays OS-agnostic
+    //      (no PSW priority inspection). serial_in_delay_ms is set
+    //      from [diag] serialdelay in config.ini.
+    //
+    // Wraparound: millis() wraps every ~49.7 days. The unsigned
+    // subtraction (now - s_last_addchar_ms) wraps correctly for any
+    // delay < 2^31 ms. The corner case where the *previous* addchar
+    // happened within `delay` ms of the wrap boundary is closed by
+    // s_fifo_drained: once the host FIFO drains empty (no chars
+    // pending), the next arriving char bypasses the delay entirely,
+    // so an idle wraparound never matters.
+    bool inttytin_queued = false;
+    for (uint8_t i = 0; i < ITABN; i++) {
+        if (itab[i].vec == 0) break;
+        if (itab[i].vec == INTTTYIN) { inttytin_queued = true; break; }
+    }
+
+    if (!(TKS & 0x80) && !inttytin_queued)
     {
-        uint8_t c;
-        if (console_key_pop(&c))
+        uint32_t now = millis();
+        bool delay_ok = s_fifo_drained ||
+                        (uint32_t)(now - s_last_addchar_ms) >= serial_in_delay_ms;
+        if (delay_ok)
         {
-            if (c == '\n' || c == '\r')
+            static bool prefer_telnet = false;
+            uint8_t c;
+            bool got;
+            if (prefer_telnet)
+                got = telnet_in_pop(&c) || console_key_pop(&c);
+            else
+                got = console_key_pop(&c) || telnet_in_pop(&c);
+            if (got)
             {
-                procNS::trapped |= VTRAP_ON_NL;
+                prefer_telnet = !prefer_telnet;
+                if (c == '\n' || c == '\r')
+                {
+                    procNS::trapped |= VTRAP_ON_NL;
+                }
+                addchar(c & 0x7F);
+                s_last_addchar_ms = now;
+                s_fifo_drained    = false;
             }
-            addchar(c & 0x7F);
+            else
+            {
+                // No host bytes pending. Mark idle so the next arriving
+                // char bypasses the delay (and the millis() wraparound
+                // corner case becomes a non-issue).
+                s_fifo_drained = true;
+            }
         }
     }
 
     // Write: when the guest puts a char in TPB, count up 32 polls (mimics
-    // a baud-rate-limited UART) then fan out to all three host channels.
+    // a baud-rate-limited UART) then fan the byte into all three host
+    // FIFOs. Each sink owns its own 8 KB ring and drains independently,
+    // so a slow USB host or a wedged telnet client can't stall the TFT
+    // (or each other), and the KL11 itself never blocks.
     if ((TPS & 0x80) == 0)
     {
         if (++count > 32)
         {
             uint8_t out = TPB & 0x7f;  // strip parity bit
-            console_feed(out);          // TFT 80x25 grid
-            telnet_write(out);          // any connected telnet client
-            if (!g_serial_silenced) Serial.write(out);  // USB-Serial monitor
+            console_feed(out);         // -> TFT-out FIFO
+            telnet_write(out);         // -> Telnet-out FIFO (with IAC escape)
+            g_serial_out.push(out);    // -> USB-Serial-out FIFO
             TPS |= 0x80;
             if (TPS & (1 << 6))
             {
@@ -168,7 +281,21 @@ uint16_t read16(uint32_t a)
             // Clear only bit 7 (RX done); bit 0 is the reader-enable
             // flag which is set by software, not by reading TKB.
             TKS &= 0xff7f;
+            if (input_trace_enabled) {
+                uint8_t rc = (uint8_t)(TKB & 0x7f);
+                LOG("kl11 rd: 0x%02x %s%c%s  PC=0%o  ms=%lu",
+                    (unsigned)rc,
+                    (rc >= 0x20 && rc < 0x7f) ? "'" : "",
+                    (rc >= 0x20 && rc < 0x7f) ? rc  : '.',
+                    (rc >= 0x20 && rc < 0x7f) ? "'" : "",
+                    (unsigned)procNS::R[7],
+                    (unsigned long)millis());
+            }
             return TKB;
+        }
+        if (input_trace_enabled) {
+            LOG("kl11 rd: (TKS bit7=0, returning 0)  PC=0%o  ms=%lu",
+                (unsigned)procNS::R[7], (unsigned long)millis());
         }
         return 0;
     case DEV_CONSOLE_TTY_OUT_STATUS:

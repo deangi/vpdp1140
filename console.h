@@ -12,7 +12,14 @@ class TFT_eSPI;
 void console_init();
 
 // Feed one byte of the guest console output stream (BIOS PUTCHAR / ANSI).
+// Buffered: the byte is queued into an 8 KB FIFO and rendered by
+// console_drain_tft() on the next loop slice, so kl11::poll() never
+// blocks on the cell grid.
 void console_feed(uint8_t c);
+
+// Drain queued bytes through the ANSI parser into the cell grid. Call
+// from loop() on core 1. render_task (core 0) reads the cell grid.
+void console_drain_tft();
 
 // Keyboard: bytes typed by the user (serial / telnet / touch), delivered
 // to the guest via the BIOS keyboard hook.

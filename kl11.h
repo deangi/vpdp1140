@@ -52,4 +52,18 @@ uint16_t read16(uint32_t a);
 void reset();
 void poll();
 
+// Diagnostic: when true, every byte delivered into TKB is LOG'd to USB-Serial
+// (interleaves with the data channel). Set from config.ini [diag] tty_trace.
+extern bool input_trace_enabled;
+
+// Minimum host-side ms between successive TKB loads. 0 disables the gate
+// (back to instruction-rate delivery, fine for slow human typing but not
+// for line-buffered terminal bursts). Set from [diag] serialdelay.
+extern uint32_t serial_in_delay_ms;
+
+// Drain queued KL11->USB-Serial bytes (called from loop() on core 1).
+// The KL11 push path is non-blocking; this turns the 8 KB FIFO into
+// actual Serial.write() output at whatever pace the host can take.
+void drain_serial_out();
+
 };  // namespace kl11

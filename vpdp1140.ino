@@ -48,6 +48,7 @@
 #include "secrets.h"
 #include "appconfig.h"
 #include "cpu_pdp11.h"
+#include "kl11.h"        // kl11::drain_serial_out() in loop()
 #include "dd11.h"  // dd11::v4b_quirks_enabled gate
 #include "kwp.h"   // kwp::enabled gate
 #include "disk.h"
@@ -198,6 +199,9 @@ static void sd_and_config_init() {
   // guest memory access.
   dd11::v4b_quirks_enabled = cfg.v4b_quirks;
   kwp::enabled             = cfg.kwp_enabled;
+  kl11::input_trace_enabled = cfg.diag_tty_trace;
+  kl11::serial_in_delay_ms  = (uint32_t)(cfg.diag_serialdelay_ms < 0 ? 0
+                                       : cfg.diag_serialdelay_ms);
 
   // Show the boot drive's image path (e.g. "Boot DL0:" / "Boot RK0:").
   char boot_label[16];
@@ -478,14 +482,31 @@ void loop() {
   if (ui_is_open()) { delay(8); return; }
 
   // Running: feed the keyboard, run the PDP-11 in small slices, service
-  // telnet between slices so the network console stays responsive.
+  // telnet between slices so the network console stays responsive, and
+  // drain the KL11->host output FIFOs (USB-Serial + TFT) so the 8 KB
+  // rings stay near empty during steady-state output. Telnet's TX FIFO
+  // is drained inside telnet_poll().
   for (int slice = 0; slice < 5; slice++) {
-    while (Serial.available())
-      console_key_push((uint8_t)Serial.read());
-    telnet_poll();               // accept + RX -> keyboard, flush TX
+    while (Serial.available()) {
+      uint8_t b = (uint8_t)Serial.read();
+      if (kl11::input_trace_enabled) {
+        LOG("ser rx: 0x%02x %s%c%s  ms=%lu",
+            (unsigned)b,
+            (b >= 0x20 && b < 0x7f) ? "'" : "",
+            (b >= 0x20 && b < 0x7f) ? b   : '.',
+            (b >= 0x20 && b < 0x7f) ? "'" : "",
+            (unsigned long)millis());
+      }
+      console_key_push(b);                        // -> Serial-in FIFO
+    }
+    telnet_poll();               // accept + RX -> Telnet-in FIFO, flush TX FIFO
     cpu_run(8000);
+    console_drain_tft();         // TFT-out FIFO -> ANSI parser -> cell grid
+    kl11::drain_serial_out();    // Serial-out FIFO -> Serial.write
   }
   telnet_poll();
+  console_drain_tft();
+  kl11::drain_serial_out();
 
 
   // Periodic snapshot of guest CPU state - useful while bringing up

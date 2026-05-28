@@ -10,6 +10,10 @@ void        telnet_begin(uint16_t port, bool enabled);
 void        telnet_poll();              // call every loop: accept + RX + flush TX
 void        telnet_write(uint8_t c);    // queue one console-output byte
 
+// Pop the next byte that arrived from the connected telnet client.
+// Returns true if a byte was dequeued. kl11::poll() reads this.
+bool        telnet_in_pop(uint8_t* out);
+
 bool        telnet_connected();
 const char* telnet_client_ip();          // "" when no client
 uint16_t    telnet_port();

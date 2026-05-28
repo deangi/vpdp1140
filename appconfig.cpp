@@ -57,6 +57,8 @@ void config_apply_compiled_defaults(AppConfig& cfg) {
   cfg.telnet_port    = TELNET_PORT;
 
   cfg.diag_pcping_sec = 5;
+  cfg.diag_tty_trace  = false;
+  cfg.diag_serialdelay_ms = 20;
   cfg.v4b_quirks      = true;
   cfg.kwp_enabled     = false;
 
@@ -109,6 +111,11 @@ static void parse_line(AppConfig& cfg, String& section, const String& raw) {
     // "emu" kept as an alias for back-compat with the first revision of
     // the parser; "diag" is the canonical section going forward.
     if      (key == "pcping")     cfg.diag_pcping_sec = val.toInt();
+    else if (key == "serialdelay") cfg.diag_serialdelay_ms = val.toInt();
+    else if (key == "tty_trace")  cfg.diag_tty_trace = (val.equalsIgnoreCase("true") ||
+                                                       val == "1" ||
+                                                       val.equalsIgnoreCase("yes") ||
+                                                       val.equalsIgnoreCase("on"));
     else if (key == "v4b_quirks") cfg.v4b_quirks = (val.equalsIgnoreCase("true") ||
                                                    val == "1" ||
                                                    val.equalsIgnoreCase("yes") ||
@@ -222,7 +229,20 @@ bool config_write_defaults(const AppConfig& cfg) {
   f.println(";               for interrupts that break its terminal echo");
   f.println(";               (upper case shows as lower case). Set true only");
   f.println(";               for RSTS V7 hardware-test bring-up.");
+  f.println("; tty_trace   = LOG every byte delivered to the KL11 TKB. Helps");
+  f.println(";               diagnose burst-input ordering (the LOG line shares");
+  f.println(";               the USB-Serial channel with guest echo so the two");
+  f.println(";               interleave). Default false.");
+  f.println("; serialdelay = minimum ms between successive characters loaded");
+  f.println(";               into the KL11 TKB. Prevents back-to-back addchars");
+  f.println(";               while the guest is still inside klrint on the");
+  f.println(";               prior byte (which would re-enter klrint on sam11");
+  f.println(";               and reverse the order). 0 disables; 10-50 ms");
+  f.println(";               typical for V6 / RT-11 / RSTS under a line-");
+  f.println(";               buffered host (Arduino IDE Serial Monitor).");
   f.printf("pcping      = %d\r\n", cfg.diag_pcping_sec);
+  f.printf("tty_trace   = %s\r\n", cfg.diag_tty_trace ? "true" : "false");
+  f.printf("serialdelay = %d\r\n", cfg.diag_serialdelay_ms);
   f.printf("v4b_quirks  = %s\r\n", cfg.v4b_quirks ? "true" : "false");
   f.printf("kwp_enabled = %s\r\n", cfg.kwp_enabled ? "true" : "false");
   f.println();
@@ -318,8 +338,10 @@ void config_print(const AppConfig& cfg) {
       (int)cfg.wifi_password.length());
   LOG("[telnet]  enabled=%s  port=%d",
       cfg.telnet_enabled ? "true" : "false", cfg.telnet_port);
-  LOG("[diag]    pcping=%d sec%s  v4b_quirks=%s  kwp_enabled=%s",
+  LOG("[diag]    pcping=%d sec%s  tty_trace=%s  serialdelay=%d ms  v4b_quirks=%s  kwp_enabled=%s",
       cfg.diag_pcping_sec, cfg.diag_pcping_sec <= 0 ? " (disabled)" : "",
+      cfg.diag_tty_trace ? "true" : "false",
+      cfg.diag_serialdelay_ms,
       cfg.v4b_quirks  ? "true" : "false",
       cfg.kwp_enabled ? "true (V7 mode)" : "false (V4B-safe)");
   const char* boot_name;
