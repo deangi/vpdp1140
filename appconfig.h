@@ -23,14 +23,6 @@ struct AppConfig {
   // capturing other output. Default 5.
   int    diag_pcping_sec = 5;
 
-  // Per-byte LOG of every host-side character delivered into the KL11
-  // input register (TKB). Useful for diagnosing burst-input ordering
-  // bugs (e.g. a fast-typed line appearing reversed at the guest).
-  // The LOG line itself goes out USB-Serial and so will interleave with
-  // a guest echo on the same channel - read with both halves in mind.
-  // Default false.
-  bool   diag_tty_trace = false;
-
   // Minimum host-side milliseconds between successive characters loaded
   // into the KL11 receive buffer. Closes the burst-induced klrint re-
   // entry window when a host terminal (Arduino IDE Serial Monitor,
@@ -82,13 +74,31 @@ struct AppConfig {
   uint8_t boot_kind = BK_RL;
 };
 
+// Global config instance owned by vpdp1140.ino. Other modules read it
+// (e.g. ui.cpp uses cfg.title for the System Info screen) but only the
+// .ino writes - notably via config_load_wifi/_pdp inside setup().
+extern AppConfig cfg;
+
 // SD card
 bool sd_mount();
 
-// Config file IO
-bool config_load(AppConfig& cfg);                            // returns true if /config.ini existed and parsed
-bool config_write_defaults(const AppConfig& cfg);            // writes a fresh /config.ini
+// Config file IO. Split (m15): wifi credentials in /wificonfig.ini,
+// everything else in /pdpconfig.ini, with /wificonfig-NAME.ini and
+// /pdpconfig-NAME.ini variants the user can pick from the settings
+// menu (which copies the chosen variant over the active filename).
+bool config_load_wifi(AppConfig& cfg);                       // returns true if /wificonfig.ini existed; writes a default if not
+bool config_load_pdp (AppConfig& cfg);                       // returns true if /pdpconfig.ini  existed; writes a default if not
+bool config_write_default_wifi(const AppConfig& cfg);        // writes a fresh /wificonfig.ini
+bool config_write_default_pdp (const AppConfig& cfg);        // writes a fresh /pdpconfig.ini
 void config_apply_compiled_defaults(AppConfig& cfg);         // fills cfg with secrets.h + config.h defaults
+
+// SD-to-SD byte copy used by the variant picker. Truncates dst.
+bool config_copy_file(const char* src, const char* dst);
+
+// List variant files in SD root matching "<prefix>NAME.ini". Stores the
+// middle portion (between prefix and ".ini") in names[i]. Returns the
+// count actually stored (capped at max). Skips the active file itself.
+int  config_list_variants(const char* prefix, char names[][44], int max);
 
 // Disk image management
 bool ensure_disk_image(const char* path, uint32_t bytes,

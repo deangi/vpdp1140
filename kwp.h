@@ -21,7 +21,7 @@ extern uint16_t CNTR;
 // in the 0o772540..0o772556 window return 0, writes are silently
 // discarded, tick() is a no-op. Required for RSTS V4B (a working
 // KW11-P breaks its terminal driver's case handling). Set by
-// vpdp1140.ino from cfg.kwp_enabled after config_load.
+// vpdp1140.ino from cfg.kwp_enabled after config_load_pdp.
 extern bool enabled;
 
 void     reset();

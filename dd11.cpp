@@ -67,7 +67,7 @@ namespace dd11 {
 
 // Runtime gate for the V4B compat absorbs. Default true so V4B / V6 /
 // XXDP / RT-11 work out of the box; vpdp1140.ino flips it from
-// config.ini [diag] v4b_quirks at boot.
+// pdpconfig.ini [diag] v4b_quirks at boot.
 bool v4b_quirks_enabled = true;
 
 uint16_t read8(const uint32_t a)
@@ -322,7 +322,7 @@ void write16(uint32_t a, uint16_t v)
 #endif
 
     // Device-probe absorption ranges - gated by v4b_quirks_enabled
-    // ([diag] v4b_quirks in config.ini). RSTS V4B walks a table of CSRs
+    // ([diag] v4b_quirks in pdpconfig.ini). RSTS V4B walks a table of CSRs
     // and writes a tickle value to each; bus error = "not present".
     // V4B's bus-error handler unconditionally HALTs, so we have to
     // absorb the two known-V4B-probed ranges or V4B panics. Same
@@ -334,7 +334,7 @@ void write16(uint32_t a, uint16_t v)
     // For RSTS V7 the TT1 absorb backfires: V7 sees a phantom DL11,
     // allocates it a floating vector, and critical devices (RK, RL)
     // collide on the next vector and get disabled. Setting
-    // v4b_quirks=false in config.ini reverts to honest bus errors
+    // v4b_quirks=false in pdpconfig.ini reverts to honest bus errors
     // here so V7 can identify absent devices correctly.
     //
     // The broader floating-CSR pools (0o770500..0o770776 and

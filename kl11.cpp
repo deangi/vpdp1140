@@ -78,13 +78,8 @@ EXT_RAM_BSS_ATTR static uint8_t serial_out_storage[VPDP_KL11_FIFO_BYTES];
 static Fifo g_serial_out;
 static bool g_serial_out_inited = false;
 
-// Diagnostic flag (set from config.ini [diag] tty_trace). When true, every
-// byte that enters addchar() gets LOG'd along with a millisecond timestamp,
-// so the host operator can see the order the KL11 saw a burst of input.
-bool input_trace_enabled = false;
-
 // Inter-character delay (ms) between successive TKB loads (set from
-// [diag] serialdelay in config.ini). After each addchar we record the
+// [diag] serialdelay in pdpconfig.ini). After each addchar we record the
 // host's millis(); the next byte can't enter TKB until at least this
 // many ms have elapsed. Closes the burst-induced klrint re-entry window
 // at the KL11 layer in an OS-agnostic way (no PSW priority inspection).
@@ -154,15 +149,6 @@ static void addchar(char c)
 #endif
 
     TKS |= 0x80;
-    if (input_trace_enabled) {
-        uint8_t pc = (uint8_t)(TKB & 0x7f);
-        LOG("kl11 in: 0x%02x %s%c%s  ms=%lu",
-            (unsigned)pc,
-            (pc >= 0x20 && pc < 0x7f) ? "'" : "",
-            (pc >= 0x20 && pc < 0x7f) ? pc  : '.',
-            (pc >= 0x20 && pc < 0x7f) ? "'" : "",
-            (unsigned long)millis());
-    }
     if (TKS & (1 << 6))
     {
         procNS::interrupt(INTTTYIN, 4);
@@ -197,7 +183,7 @@ void poll()
     //      A small ms gap matches what a real serial line would have
     //      enforced via baud-rate timing, and stays OS-agnostic
     //      (no PSW priority inspection). serial_in_delay_ms is set
-    //      from [diag] serialdelay in config.ini.
+    //      from [diag] serialdelay in pdpconfig.ini.
     //
     // Wraparound: millis() wraps every ~49.7 days. The unsigned
     // subtraction (now - s_last_addchar_ms) wraps correctly for any
@@ -281,21 +267,7 @@ uint16_t read16(uint32_t a)
             // Clear only bit 7 (RX done); bit 0 is the reader-enable
             // flag which is set by software, not by reading TKB.
             TKS &= 0xff7f;
-            if (input_trace_enabled) {
-                uint8_t rc = (uint8_t)(TKB & 0x7f);
-                LOG("kl11 rd: 0x%02x %s%c%s  PC=0%o  ms=%lu",
-                    (unsigned)rc,
-                    (rc >= 0x20 && rc < 0x7f) ? "'" : "",
-                    (rc >= 0x20 && rc < 0x7f) ? rc  : '.',
-                    (rc >= 0x20 && rc < 0x7f) ? "'" : "",
-                    (unsigned)procNS::R[7],
-                    (unsigned long)millis());
-            }
             return TKB;
-        }
-        if (input_trace_enabled) {
-            LOG("kl11 rd: (TKS bit7=0, returning 0)  PC=0%o  ms=%lu",
-                (unsigned)procNS::R[7], (unsigned long)millis());
         }
         return 0;
     case DEV_CONSOLE_TTY_OUT_STATUS:

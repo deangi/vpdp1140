@@ -36,11 +36,14 @@
 #define HIT_UP   -3
 #define HIT_DOWN -4
 
-enum Screen { SC_CLOSED, SC_MAIN, SC_DRIVES, SC_DRIVE, SC_PICKER, SC_INFO, SC_BRIGHT };
+enum Screen { SC_CLOSED, SC_MAIN, SC_DRIVES, SC_DRIVE, SC_PICKER, SC_INFO, SC_BRIGHT,
+              // m15: config-variant picker + confirmation screens
+              SC_WIFI_PICKER, SC_PDP_PICKER, SC_CONFIRM_COPY, SC_CONFIRM_RESET };
 
 static Screen   g_screen = SC_CLOSED;
 static bool     g_dirty  = false;
 static bool     g_reboot = false;
+static bool     g_esp_restart = false;   // m15: full ESP32 hardware reset requested
 static int      g_sel    = 0;          // drive index for SC_DRIVE / SC_PICKER
 static int      g_scroll = 0;
 static uint8_t  g_bright = 255;
@@ -48,6 +51,20 @@ static uint8_t  g_bright = 255;
 #define MAX_FILES 16
 static char g_files[MAX_FILES][44];
 static int  g_file_count = 0;
+
+// m15: config variants scanned from SD root for the WiFi / PDP pickers.
+#define MAX_VARIANTS 16
+static char g_variants[MAX_VARIANTS][44];
+static int  g_variant_count = 0;
+
+// m15: copy source/destination pending across the confirmation screens.
+// Set when the user taps a variant in SC_WIFI_PICKER / SC_PDP_PICKER;
+// consumed in SC_CONFIRM_COPY when the user confirms.
+// g_pending_src sized to hold "/<prefix><variant>.ini" - variant is up
+// to 42 chars, prefix is up to 11, plus "/" + ".ini" + null = 64.
+static char  g_pending_src[64];      // e.g. "/wificonfig-home.ini"
+static char  g_pending_dst[24];      // e.g. "/wificonfig.ini"
+static char  g_pending_label[44];    // human-friendly name shown in the title
 
 #define MAX_ITEMS 20
 static char g_title[40];
@@ -63,8 +80,9 @@ void ui_init() {
   ledcWrite(TFT_BL, g_bright);
 }
 
-bool ui_is_open()        { return g_screen != SC_CLOSED; }
-bool ui_consume_reboot() { bool r = g_reboot; g_reboot = false; return r; }
+bool ui_is_open()             { return g_screen != SC_CLOSED; }
+bool ui_consume_reboot()      { bool r = g_reboot;      g_reboot      = false; return r; }
+bool ui_consume_esp_restart() { bool r = g_esp_restart; g_esp_restart = false; return r; }
 
 // ---- scan SD root for mountable images ----
 static void scan_files() {
@@ -109,9 +127,12 @@ static void rebuild() {
     case SC_MAIN:
       strcpy(g_title, "PDP-11/40 Settings");
       strcpy(g_items[g_count++], "Drives");
+      strcpy(g_items[g_count++], "WiFi Config");
+      strcpy(g_items[g_count++], "PDP Config");
       strcpy(g_items[g_count++], "System Info");
       strcpy(g_items[g_count++], "Brightness");
       strcpy(g_items[g_count++], "Reboot PDP-11");
+      strcpy(g_items[g_count++], "Reset ESP32");
       break;
     case SC_DRIVES:
       strcpy(g_title, "Drives");
@@ -156,6 +177,34 @@ static void rebuild() {
     case SC_INFO:
       strcpy(g_title, "System Info");
       break;
+    case SC_WIFI_PICKER:
+      strcpy(g_title, "Select WiFi Config");
+      if (g_variant_count == 0) {
+        strcpy(g_items[g_count++], "(no variants found)");
+      } else {
+        for (int i = 0; i < g_variant_count && g_count < MAX_ITEMS; i++)
+          strncpy(g_items[g_count++], g_variants[i], 43);
+      }
+      break;
+    case SC_PDP_PICKER:
+      strcpy(g_title, "Select PDP Config");
+      if (g_variant_count == 0) {
+        strcpy(g_items[g_count++], "(no variants found)");
+      } else {
+        for (int i = 0; i < g_variant_count && g_count < MAX_ITEMS; i++)
+          strncpy(g_items[g_count++], g_variants[i], 43);
+      }
+      break;
+    case SC_CONFIRM_COPY:
+      snprintf(g_title, sizeof(g_title), "Apply: %s", g_pending_label);
+      strcpy(g_items[g_count++], "Yes, copy");
+      strcpy(g_items[g_count++], "Cancel");
+      break;
+    case SC_CONFIRM_RESET:
+      strcpy(g_title, "Reset ESP32 now?");
+      strcpy(g_items[g_count++], "Yes, reset now");
+      strcpy(g_items[g_count++], "Not yet");
+      break;
     default: break;
   }
   if (g_scroll > g_count - MENU_VISIBLE) g_scroll = g_count - MENU_VISIBLE;
@@ -184,14 +233,26 @@ static int list_hit(int x, int y) {
 
 static void do_back() {
   switch (g_screen) {
-    case SC_MAIN:   g_screen = SC_CLOSED; break;
-    case SC_DRIVES: go(SC_MAIN);   break;
-    case SC_DRIVE:  go(SC_DRIVES); break;
-    case SC_PICKER: go(SC_DRIVES); break;
-    case SC_INFO:   go(SC_MAIN);   break;
-    case SC_BRIGHT: go(SC_MAIN);   break;
+    case SC_MAIN:           g_screen = SC_CLOSED; break;
+    case SC_DRIVES:         go(SC_MAIN);   break;
+    case SC_DRIVE:          go(SC_DRIVES); break;
+    case SC_PICKER:         go(SC_DRIVES); break;
+    case SC_INFO:           go(SC_MAIN);   break;
+    case SC_BRIGHT:         go(SC_MAIN);   break;
+    case SC_WIFI_PICKER:    go(SC_MAIN);   break;
+    case SC_PDP_PICKER:     go(SC_MAIN);   break;
+    case SC_CONFIRM_COPY:   go(SC_MAIN);   break;
+    case SC_CONFIRM_RESET:  go(SC_MAIN);   break;
     default: break;
   }
+}
+
+// Scan SD root for /<prefix>NAME.ini variants. Populates g_variants[][]
+// and g_variant_count. Called when the user opens SC_WIFI_PICKER or
+// SC_PDP_PICKER (matches the existing scan_files() pattern, but pulls
+// from appconfig.cpp so we don't duplicate the SD iteration here).
+static void scan_variants(const char* prefix) {
+  g_variant_count = config_list_variants(prefix, g_variants, MAX_VARIANTS);
 }
 
 static void activate(int idx) {        // idx = absolute item index
@@ -199,9 +260,12 @@ static void activate(int idx) {        // idx = absolute item index
   switch (g_screen) {
     case SC_MAIN:
       if      (idx == 0) go(SC_DRIVES);
-      else if (idx == 1) go(SC_INFO);
-      else if (idx == 2) go(SC_BRIGHT);
-      else if (idx == 3) { g_reboot = true; g_screen = SC_CLOSED; }
+      else if (idx == 1) { scan_variants(WIFI_CFG_PREFIX); go(SC_WIFI_PICKER); }
+      else if (idx == 2) { scan_variants(PDP_CFG_PREFIX);  go(SC_PDP_PICKER);  }
+      else if (idx == 3) go(SC_INFO);
+      else if (idx == 4) go(SC_BRIGHT);
+      else if (idx == 5) { g_reboot = true; g_screen = SC_CLOSED; }
+      else if (idx == 6) go(SC_CONFIRM_RESET);
       break;
     case SC_DRIVES:
       g_sel = idx;                       // 0..3 -> A..D
@@ -232,6 +296,48 @@ static void activate(int idx) {        // idx = absolute item index
       else          g_bright = (g_bright < 215) ? g_bright + 40 : 255;
       ledcWrite(TFT_BL, g_bright);
       rebuild(); g_dirty = true;
+      break;
+    case SC_WIFI_PICKER:
+    case SC_PDP_PICKER: {
+      if (g_variant_count == 0) break;       // "(no variants found)" placeholder
+      if (idx >= g_variant_count) break;
+      // Build the full source path and remember the active filename to copy to.
+      const char* prefix = (g_screen == SC_WIFI_PICKER) ? WIFI_CFG_PREFIX
+                                                        : PDP_CFG_PREFIX;
+      const char* dst    = (g_screen == SC_WIFI_PICKER) ? WIFI_CFG_PATH
+                                                        : PDP_CFG_PATH;
+      snprintf(g_pending_src, sizeof(g_pending_src),
+               "/%s%s.ini", prefix, g_variants[idx]);
+      strncpy(g_pending_dst, dst, sizeof(g_pending_dst) - 1);
+      g_pending_dst[sizeof(g_pending_dst) - 1] = 0;
+      strncpy(g_pending_label, g_variants[idx], sizeof(g_pending_label) - 1);
+      g_pending_label[sizeof(g_pending_label) - 1] = 0;
+      go(SC_CONFIRM_COPY);
+      break;
+    }
+    case SC_CONFIRM_COPY:
+      if (idx == 0) {
+        bool ok = config_copy_file(g_pending_src, g_pending_dst);
+        LOG("ui: copy %s -> %s %s",
+            g_pending_src, g_pending_dst, ok ? "OK" : "FAIL");
+        go(SC_CONFIRM_RESET);
+      } else {
+        go(SC_MAIN);
+      }
+      break;
+    case SC_CONFIRM_RESET:
+      if (idx == 0) {
+        // No LOG here: this handler runs with g_ui_mutex held, and
+        // Serial.printf on USB-CDC can block indefinitely when no host
+        // is reading the port. Set a one-shot flag and let loop() do
+        // the reset after the mutex is released; loop() also skips all
+        // serial activity for the same reason.
+        g_esp_restart = true;
+        g_screen      = SC_CLOSED;   // close menu so loop() resumes
+        g_dirty       = false;
+      } else {
+        go(SC_MAIN);
+      }
       break;
     default: break;
   }
@@ -286,9 +392,13 @@ static void draw_list() {
     int y = ITEM_Y0 + i * ITEM_H;
     uint16_t bg = COL_ITEM;
     if (g_screen == SC_DRIVES && idx < 4 && disk_is_mounted(idx)) bg = COL_ITEM_HI;
-    if (g_screen == SC_MAIN && idx == 3) bg = COL_DANGER;
+    // SC_MAIN items 5 (Reboot PDP-11) and 6 (Reset ESP32) are destructive.
+    if (g_screen == SC_MAIN && (idx == 5 || idx == 6)) bg = COL_DANGER;
     if (g_screen == SC_DRIVE && idx == 1) bg = COL_DANGER;
     if (g_screen == SC_PICKER && idx == 0) bg = COL_ITEM_HI;   // create-new
+    // m15: highlight the "Yes" buttons on the two confirmation screens.
+    if (g_screen == SC_CONFIRM_RESET && idx == 0) bg = COL_DANGER;
+    if (g_screen == SC_CONFIRM_COPY  && idx == 0) bg = COL_ITEM_HI;
     draw_button(6, y, 308, 42, g_items[idx], bg, COL_TEXT);
   }
   draw_nav();
@@ -305,7 +415,8 @@ static void draw_info() {
 
   char line[64];
   int y = 34;
-  snprintf(line, sizeof(line), "%s  version %s", APP_TITLE, APP_VERSION);
+  const char* title = cfg.title.length() ? cfg.title.c_str() : APP_TITLE;
+  snprintf(line, sizeof(line), "%s  version %s", title, APP_VERSION);
   T->drawString(line, 10, y, 2); y += 22;
   snprintf(line, sizeof(line), "build %s", APP_BUILD_DATE);
   T->drawString(line, 10, y, 2); y += 26;

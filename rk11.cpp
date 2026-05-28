@@ -130,17 +130,6 @@ static void execute()
 
     RKER = 0;
 
-    // Log the first ~40 RK commands of each boot so the bootrom + early
-    // disk activity is visible, then go quiet.
-    static int dbg_left = 40;
-    if (dbg_left > 0) {
-        Serial.printf("[vpdp1140] RK11 %s drv=%d  DA=%06o WC=%06o BA=%06o CS=%06o\r\n",
-                      func_name(func), drv, RKDA, RKWC, RKBA, RKCS);
-        dbg_left--;
-        if (dbg_left == 0)
-            Serial.printf("[vpdp1140] RK11 (silencing further command logs)\r\n");
-    }
-
     switch (func) {
     case 0:  // CONTROL RESET
         reset();

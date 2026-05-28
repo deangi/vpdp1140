@@ -13,9 +13,9 @@
 // is V6 Unix (sam11's tested config) and/or XXDP+ diagnostics + RT-11.
 //
 // The ESP32-S3 host scaffolding (TFT console, telnet, USB serial, SD images,
-// touch settings menu, config.ini, dual-core split) carries over from v8088
-// unchanged; only the CPU core, I/O page dispatch, and disk/console wiring
-// are PDP-11-specific.
+// touch settings menu, wificonfig.ini + pdpconfig.ini, dual-core split)
+// carries over from v8088 unchanged; only the CPU core, I/O page dispatch,
+// and disk/console wiring are PDP-11-specific.
 //
 // Requires the TFT_eSPI library to have FNK0104B selected in
 // User_Setup_Select.h (this is the same setup used by all Freenove
@@ -59,7 +59,9 @@
 
 static TFT_eSPI tft;
 static Freenove_ESP32_WS2812 strip(LED_COUNT, LED_PIN, LED_CHANNEL, TYPE_GRB);
-static AppConfig cfg;
+AppConfig cfg;             // non-static so ui.cpp (System Info screen,
+                           // title display) can read it via the extern in
+                           // appconfig.h. Only vpdp1140.ino writes it.
 static bool sd_ok = false;
 static bool cpu_running = false;   // true once the PDP-11 is booting in loop()
 
@@ -77,12 +79,21 @@ static void led(uint8_t r, uint8_t g, uint8_t b) {
   strip.show();
 }
 
-static void tft_banner() {
-  tft.fillScreen(TFT_BLACK);
+// Re-draw just the title row (top 22 px). Called once at boot before the
+// config is loaded (shows APP_TITLE) and again after config_load_pdp so
+// [system] title = ... from pdpconfig.ini takes effect on the boot screen.
+static void tft_banner_title() {
+  tft.fillRect(0, 0, TFT_W, 22, TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextFont(2);
   tft.setCursor(4, 4);
-  tft.printf("%s  v%s", APP_TITLE, APP_VERSION);
+  const char* title = cfg.title.length() ? cfg.title.c_str() : APP_TITLE;
+  tft.printf("%s  v%s", title, APP_VERSION);
+}
+
+static void tft_banner() {
+  tft.fillScreen(TFT_BLACK);
+  tft_banner_title();
   tft.setCursor(4, 22);
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
   tft.printf("build %s", APP_BUILD_DATE);
@@ -102,7 +113,7 @@ static void tft_status(int row, const char* label, const char* value, uint16_t c
 // Row map for the boot status display:
 //   row 0 = PSRAM
 //   row 1 = SD card
-//   row 2 = /config.ini
+//   row 2 = /wificonfig.ini + /pdpconfig.ini
 //   row 3 = boot drive image
 //   row 4 = WiFi
 //   row 5 = IP
@@ -134,8 +145,8 @@ static void wifi_connect() {
   const char* host = cfg.wifi_hostname.length() ? cfg.wifi_hostname.c_str() : WIFI_HOSTNAME;
 
   if (cfg.wifi_ssid.length() == 0) {
-    LOGE("WiFi SSID is empty - set [wifi] ssid= in /config.ini");
-    tft_status(ROW_WIFI, "WiFi:  ", "no SSID in config.ini", TFT_RED);
+    LOGE("WiFi SSID is empty - set [wifi] ssid= in /wificonfig.ini");
+    tft_status(ROW_WIFI, "WiFi:  ", "no SSID in wificonfig.ini", TFT_RED);
     tft_status(ROW_IP,   "IP:    ", "(none)", TFT_RED);
     boot_state = BOOT_FAIL;
     return;
@@ -187,21 +198,26 @@ static void sd_and_config_init() {
     config_apply_compiled_defaults(cfg);
     tft_status(ROW_CFG, "Cfg:   ", "defaults (no SD)", TFT_YELLOW);
   } else {
-    bool existed = config_load(cfg);
-    tft_status(ROW_CFG, "Cfg:   ",
-               existed ? "loaded /config.ini" : "wrote default /config.ini",
-               existed ? TFT_GREEN : TFT_YELLOW);
+    config_apply_compiled_defaults(cfg);
+    bool wifi_existed = config_load_wifi(cfg);
+    bool pdp_existed  = config_load_pdp(cfg);
+    const char* msg =
+        (wifi_existed && pdp_existed) ? "loaded wifi+pdp"
+      : (wifi_existed)                ? "wrote default pdpconfig"
+      : (pdp_existed)                 ? "wrote default wificonfig"
+                                      : "wrote defaults (both)";
+    uint16_t col = (wifi_existed && pdp_existed) ? TFT_GREEN : TFT_YELLOW;
+    tft_status(ROW_CFG, "Cfg:   ", msg, col);
   }
   config_print(cfg);
 
   // Push the V4B-quirks flag down to dd11 so its probe-absorb ranges
-  // honor what config.ini said. Must happen before cpu_reset() / any
+  // honor what pdpconfig.ini said. Must happen before cpu_reset() / any
   // guest memory access.
   dd11::v4b_quirks_enabled = cfg.v4b_quirks;
   kwp::enabled             = cfg.kwp_enabled;
-  kl11::input_trace_enabled = cfg.diag_tty_trace;
-  kl11::serial_in_delay_ms  = (uint32_t)(cfg.diag_serialdelay_ms < 0 ? 0
-                                       : cfg.diag_serialdelay_ms);
+  kl11::serial_in_delay_ms = (uint32_t)(cfg.diag_serialdelay_ms < 0 ? 0
+                                      : cfg.diag_serialdelay_ms);
 
   // Show the boot drive's image path (e.g. "Boot DL0:" / "Boot RK0:").
   char boot_label[16];
@@ -219,7 +235,7 @@ static void sd_and_config_init() {
   }
 }
 
-// Mount the four guest drives from /config.ini paths.
+// Mount the four guest drives from /pdpconfig.ini paths.
 // When boot=rk0 we substitute disk_rk0 into slot 0 (so the RK11 controller
 // sees the RK05 image as drive 0) and the corresponding unit name flips
 // from "DL0" to "RK0".
@@ -287,11 +303,26 @@ static void draw_status_bar() {
   tft.drawString(WiFi.status() == WL_CONNECTED
                    ? WiFi.localIP().toString().c_str() : "WiFi down",
                  158, sy + 6, 1);
-  char line[40];
-  snprintf(line, sizeof(line), "%s   %.2f MIPS",
-           telnet_connected() ? "TELNET" : "      ", mips);
+  // TELNET indicator stays anchored to the left of the right column;
+  // MIPS gets right-aligned to the screen edge via TR_DATUM so it's
+  // always at the rightmost column regardless of how many digits.
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString(line, 158, sy + 22, 1);
+  tft.drawString(telnet_connected() ? "TELNET" : "      ",
+                 158, sy + 22, 1);
+  char mips_str[16];
+  snprintf(mips_str, sizeof(mips_str), "%.2f MIPS", mips);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString(mips_str, TFT_W - 4, sy + 22, 1);
+  tft.setTextDatum(TL_DATUM);   // restore for the title row below
+
+  // [system] title from pdpconfig.ini, drawn below the drive indicators
+  // (left half, the empty strip under the DL0/DL1/DX0/DX1 boxes). Falls
+  // back to APP_TITLE if the user left the field blank.
+  tft.fillRect(0, sy + 22, 156, TFT_H - sy - 22, TFT_BLACK);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  const char* title = cfg.title.length() ? cfg.title.c_str() : APP_TITLE;
+  tft.drawString(title, 6, sy + 24, 2);
 }
 
 // Boot (or reboot) the PDP-11 with the currently-mounted drives. cold=true
@@ -411,6 +442,7 @@ void setup() {
   }
 
   sd_and_config_init();
+  tft_banner_title();        // refresh banner with cfg.title from pdpconfig.ini
 
   wifi_connect();
 
@@ -445,25 +477,43 @@ void setup() {
 // loop() runs on core 1 and IS the PDP-11: CPU emulation plus telnet, touch
 // and the settings-menu logic. It never touches the TFT - render_task (core
 // 0) owns the display.
+// Touch handling lives at file scope so cpu_run's per-slice work and the
+// menu-open early-return path can share the same state. The 750 ms
+// window is wider than the original 450 ms because users were missing
+// the second tap of a fast double-tap when the timer rolled over.
+static uint32_t g_last_tap_ms = 0;
+#define UI_DOUBLE_TAP_MS 750
+
+// Poll the touchscreen once. When the menu is open, route the tap into
+// the menu; when closed, accumulate it as a double-tap candidate that
+// opens the menu when two taps land within UI_DOUBLE_TAP_MS of each
+// other. Called from loop() once per slice so a fast double-tap can't
+// fall between two touch_poll calls (cpu_run runs ~40 ms total, and
+// the FT6336U doesn't buffer events for us).
+static void poll_touch_once() {
+  int tx, ty;
+  if (!touch_poll(&tx, &ty)) return;
+  if (ui_is_open()) {
+    ui_tap_locked(tx, ty);
+    return;
+  }
+  uint32_t now = millis();
+  if ((uint32_t)(now - g_last_tap_ms) < UI_DOUBLE_TAP_MS) {
+    ui_open_locked();
+    g_last_tap_ms = 0;
+  } else {
+    g_last_tap_ms = now;
+  }
+}
+
 void loop() {
   if (!cpu_running) { delay(100); return; }
 
   static bool     boot_done = false;
   static bool     btn_prev  = true;
-  static uint32_t last_tap  = 0;
   static uint32_t wifi_ms   = 0;
 
-  // Touch: menu open -> taps drive the menu; closed -> a double-tap opens it.
-  int tx, ty;
-  if (touch_poll(&tx, &ty)) {
-    if (ui_is_open()) {
-      ui_tap_locked(tx, ty);
-    } else {
-      uint32_t now = millis();
-      if (now - last_tap < 450) { ui_open_locked(); last_tap = 0; }
-      else                        last_tap = now;
-    }
-  }
+  poll_touch_once();
 
   // Onboard button (GPIO0, active low): press opens the menu.
   bool btn_now = digitalRead(BUTTON_PIN);
@@ -478,6 +528,16 @@ void loop() {
     led(0, 0, 32);
   }
 
+  // "Reset ESP32" from the menu. NO serial activity on this path - if the
+  // host isn't reading USB-CDC (Arduino IDE Serial Monitor closed, no PC
+  // attached, etc.), Serial.write / Serial.printf / our kl11 drain all
+  // block on the USB-CDC TX semaphore (default ~5 s timeout, sometimes
+  // hangs indefinitely). The user already saw the on-screen confirmation,
+  // so we just reset immediately and let any in-flight serial bytes drop.
+  if (ui_consume_esp_restart()) {
+    ESP.restart();   // does not return
+  }
+
   // While the menu is open the PDP-11 is paused; just keep polling for taps.
   if (ui_is_open()) { delay(8); return; }
 
@@ -487,18 +547,13 @@ void loop() {
   // rings stay near empty during steady-state output. Telnet's TX FIFO
   // is drained inside telnet_poll().
   for (int slice = 0; slice < 5; slice++) {
-    while (Serial.available()) {
-      uint8_t b = (uint8_t)Serial.read();
-      if (kl11::input_trace_enabled) {
-        LOG("ser rx: 0x%02x %s%c%s  ms=%lu",
-            (unsigned)b,
-            (b >= 0x20 && b < 0x7f) ? "'" : "",
-            (b >= 0x20 && b < 0x7f) ? b   : '.',
-            (b >= 0x20 && b < 0x7f) ? "'" : "",
-            (unsigned long)millis());
-      }
-      console_key_push(b);                        // -> Serial-in FIFO
-    }
+    // Per-slice touch poll: cpu_run(8000) takes ~8 ms, so polling here
+    // catches the second tap of a fast double-tap that would otherwise
+    // fall between two loop iterations (~40 ms gap). Cheap - touch_poll
+    // is a single I2C transaction to the FT6336U.
+    poll_touch_once();
+    while (Serial.available())
+      console_key_push((uint8_t)Serial.read());   // -> Serial-in FIFO
     telnet_poll();               // accept + RX -> Telnet-in FIFO, flush TX FIFO
     cpu_run(8000);
     console_drain_tft();         // TFT-out FIFO -> ANSI parser -> cell grid
@@ -512,7 +567,7 @@ void loop() {
   // Periodic snapshot of guest CPU state - useful while bringing up
   // disk/OS bootstrap. If PC stays put, the guest is stuck in a tight
   // loop; if PC moves through a small window, it's a finite poll loop.
-  // Rate is [diag] pcping in config.ini (seconds). 0 disables it.
+  // Rate is [diag] pcping in pdpconfig.ini (seconds). 0 disables it.
   static uint32_t s_state_ms = 0;
   uint32_t s_now = millis();
   if (cfg.diag_pcping_sec > 0 &&

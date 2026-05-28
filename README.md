@@ -1,4 +1,4 @@
-# vpdp1140 — a DEC PDP-11/40 emulator for the ESP32-S3
+# vpdp1140 — a DEC PDP-11/40 emulator for the load 1.bESP32-S3
 
 A **Freenove ESP32-S3 2.8" Display** board turned into a tiny DEC
 PDP-11/40 that boots **V6 Unix** from an SD-card disk image. The console
@@ -21,7 +21,7 @@ The CPU core is vendored from
 [**sam11**](https://gitlab.com/ChloeLunn/sam11) by Chloe Lunn
 (BSD-3-Clause), descended from Julius Schmidt's JavaScript PDP-11
 emulator via Dave Cheney's `avr11`. The host scaffolding (TFT console,
-Telnet server, dual-core split, SD-backed block I/O, `/config.ini`,
+Telnet server, dual-core split, SD-backed block I/O, `/wificonfig.ini` + `/pdpconfig.ini`,
 capacitive-touch settings menu, WS2812 status LED) is inherited
 unchanged from the [v8088](../v8088) Intel 8088 emulator on the same
 board — that's the whole point of the fork: swap the guest CPU, keep
@@ -96,7 +96,10 @@ will bootloop the board.
 ## SD card layout
 
 ```
-/config.ini          settings (auto-created with defaults if missing)
+/wificonfig.ini      WiFi credentials (auto-created if missing)
+/pdpconfig.ini       PDP-11 settings (auto-created if missing)
+/wificonfig-*.ini    optional WiFi variants picked from the settings menu
+/pdpconfig-*.ini     optional PDP variants picked from the settings menu
 /unixv6.dsk          V6 Unix RK05 image  (2.5 MB)  ← validated boot
 /xxdp25.dsk          XXDP+ diagnostics  (RL02, 10 MB)
 /rt11v5.dsk          RT-11 SJ V5  (RK05, optional)
@@ -108,21 +111,35 @@ Sample images for V6 / XXDP+ / RT-11 / BSD 2.9 / Caldera V5/V6 ship in
 sam11's [`OS Images/`](https://gitlab.com/ChloeLunn/sam11/-/tree/master/OS%20Images)
 directory.
 
-## config.ini
+## Config files
 
+WiFi credentials live in `/wificonfig.ini`; everything else in
+`/pdpconfig.ini`. Either file can be missing on first boot — the
+firmware writes a default. Drop named copies onto the SD card
+(`wificonfig-home.ini`, `pdpconfig-rt11.ini`, ...) and pick one from
+the **WiFi Config** / **PDP Config** menu items; selection copies the
+chosen variant over the active filename and you get a confirmation
+screen offering to reset the ESP32 to apply it.
+
+`/wificonfig.ini`:
 ```ini
-[system]
-title   = vpdp1140
-version = 0.0-m4
-
 [wifi]
 ssid     = YourNetwork        ; blank uses secrets.h defaults
 password = YourPassword
 hostname = vpdp1140
+```
 
+`/pdpconfig.ini`:
+```ini
 [telnet]
 enabled = true
 port    = 23
+
+[diag]
+pcping      = 5               ; sec between PC dumps; 0 disables
+serialdelay = 20              ; ms gate between bursty input chars
+v4b_quirks  = true            ; RSTS V4B / RT-11 / V6 / XXDP
+kwp_enabled = false           ; true for RSTS V7 bring-up
 
 [disks]
 ; dl0, dl1 = RL01/RL02 packs (RL11 controller)
@@ -147,7 +164,7 @@ boot = rk0                    ; or dl0, dl1, dx0, dx1
 
 ### Booting V6 Unix
 
-1. Set `boot = rk0` and `rk0 = /unixv6.dsk` in `/config.ini`.
+1. Set `boot = rk0` and `rk0 = /unixv6.dsk` in `/pdpconfig.ini`.
 2. Power the board. After the WiFi line you should see:
    ```
    vpdp1140: booting PDP-11/40 from RK0...

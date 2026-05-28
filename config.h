@@ -2,8 +2,8 @@
 
 // ---- App metadata ----
 #define APP_TITLE       "vpdp1140"
-#define APP_VERSION     "0.0-m0"
-#define APP_BUILD_DATE  "2026-05-23"
+#define APP_VERSION     "0.0-m15"
+#define APP_BUILD_DATE  "2026-05-28"
 
 // ---- RGB LED (WS2812) ----
 #define LED_PIN         42
@@ -38,8 +38,14 @@
 #define SD_MMC_D2       48
 #define SD_MMC_D3       47
 
-// ---- File paths on SD (defaults; overridden by /config.ini) ----
-#define CFG_PATH        "/config.ini"
+// ---- File paths on SD (defaults; overridden by config files) ----
+// m15: config split into two files so users can carry named variants
+// (/wificonfig-home.ini, /pdpconfig-rt11.ini, ...) and pick via menu.
+#define WIFI_CFG_PATH    "/wificonfig.ini"
+#define PDP_CFG_PATH     "/pdpconfig.ini"
+#define WIFI_CFG_PREFIX  "wificonfig-"      // variant discovery prefix
+#define PDP_CFG_PREFIX   "pdpconfig-"
+
 #define DEFAULT_DL0_IMG "/rt11sj.dsk"      // RT-11 SJ V5.x on RL02 (10 MB)
 #define DEFAULT_DL1_IMG ""                  // DL1 dismounted by default
 
