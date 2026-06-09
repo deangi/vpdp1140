@@ -2,8 +2,8 @@
 
 // ---- App metadata ----
 #define APP_TITLE       "vpdp1140"
-#define APP_VERSION     "0.0-m15"
-#define APP_BUILD_DATE  "2026-05-28"
+#define APP_VERSION     "V1.1"
+#define APP_BUILD_DATE  "2026-06-09"
 
 // ---- RGB LED (WS2812) ----
 #define LED_PIN         42
@@ -56,6 +56,9 @@
 
 // ---- Network ----
 #define TELNET_PORT     23
+#define FTP_PORT        21
+#define FTP_DEFAULT_USER "esp32"
+#define FTP_DEFAULT_PASS "esp32"
 
 // ---- Disk geometries ----
 // RL02: 512 cylinders x 2 heads x 40 sectors x 256 words = 10 485 760 bytes.

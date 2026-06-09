@@ -16,6 +16,21 @@ struct AppConfig {
   bool   telnet_enabled = true;
   int    telnet_port    = 23;
 
+  // [console]
+  // Bytes injected into the KL11 input queue after each PDP-11 boot/reset.
+  // Parsed from escaped text in /pdpconfig.ini, e.g. "unix\r" or "\003".
+  static const size_t BOOT_INPUT_MAX = 256;
+  uint8_t boot_input[BOOT_INPUT_MAX];
+  size_t  boot_input_len = 0;
+
+  // [ftp]
+  // FTP server exposing the SD card root. Control channel uses ftp_port;
+  // passive data uses ftp_port+1.
+  bool   ftp_enabled = true;
+  int    ftp_port    = 21;
+  String ftp_user;
+  String ftp_password;
+
   // [diag]
   // Interval (seconds) for the host's periodic "state: PC=... R0=..." dump
   // to USB-Serial. 0 disables it; large values (e.g. 9999) effectively do
@@ -31,6 +46,11 @@ struct AppConfig {
   // V6 / RT-11 / RSTS guests under a line-buffered host, 10-50 ms is
   // typical. Honoured by kl11::poll. Default 20.
   int    diag_serialdelay_ms = 20;
+
+  // Per-instruction trace ring for panic diagnosis. Disabled by default
+  // because it costs an MMU decode, instruction read, and register snapshot
+  // on every guest instruction.
+  bool   diag_trace = false;
 
   // [compat]
   // V4B (RSTS/E V4B) requires its probe-by-write of two non-emulated

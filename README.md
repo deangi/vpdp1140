@@ -21,7 +21,7 @@ The CPU core is vendored from
 [**sam11**](https://gitlab.com/ChloeLunn/sam11) by Chloe Lunn
 (BSD-3-Clause), descended from Julius Schmidt's JavaScript PDP-11
 emulator via Dave Cheney's `avr11`. The host scaffolding (TFT console,
-Telnet server, dual-core split, SD-backed block I/O, `/wificonfig.ini` + `/pdpconfig.ini`,
+Telnet server, FTP server, dual-core split, SD-backed block I/O, `/wificonfig.ini` + `/pdpconfig.ini`,
 capacitive-touch settings menu, WS2812 status LED) is inherited
 unchanged from the [v8088](../v8088) Intel 8088 emulator on the same
 board — that's the whole point of the fork: swap the guest CPU, keep
@@ -64,7 +64,7 @@ reasons."
 | Boot ROM        | DEC M9312-style RK0 / RL0 stubs (selected by `boot=` in config)   |
 
 The status bar below the 80×25 console shows drive activity, WiFi IP,
-Telnet state and MIPS in real time.
+Telnet / FTP state and MIPS in real time.
 
 ## Building
 
@@ -127,6 +127,12 @@ screen offering to reset the ESP32 to apply it.
 ssid     = YourNetwork        ; blank uses secrets.h defaults
 password = YourPassword
 hostname = vpdp1140
+
+[ftp]
+enabled  = true               ; exposes the SD card root
+port     = 21                 ; passive data uses port+1
+user     = esp32
+password = esp32
 ```
 
 `/pdpconfig.ini`:
@@ -135,9 +141,13 @@ hostname = vpdp1140
 enabled = true
 port    = 23
 
+[console]
+boot_input = ""               ; e.g. "unix\r" or "^CSTART\r"
+
 [diag]
 pcping      = 5               ; sec between PC dumps; 0 disables
 serialdelay = 20              ; ms gate between bursty input chars
+trace       = false           ; true only for panic/HALT diagnosis
 v4b_quirks  = true            ; RSTS V4B / RT-11 / V6 / XXDP
 kwp_enabled = false           ; true for RSTS V7 bring-up
 
@@ -158,9 +168,14 @@ boot = rk0                    ; or dl0, dl1, dx0, dx1
 
 - The TFT console comes up at boot; the same byte stream is available
   via `telnet <board-ip> 23` and on USB serial (115200 baud).
+- `/pdpconfig.ini` `[console] boot_input` can pre-load keystrokes after
+  each PDP-11 boot/reset. It accepts escapes such as `\r`, `\n`, `\e`,
+  `\x03`, `\033`, `^C`, `^[`, and `^?`.
+- The SD card root is available over FTP at `ftp://<board-ip>:21/`
+  using the `[ftp]` credentials in `/wificonfig.ini`.
 - **Settings menu:** tap the screen or press the onboard button. From
   there you can mount/dismount/create disk images, reboot the PDP-11,
-  adjust brightness, and view WiFi / Telnet status.
+  adjust brightness, and view WiFi / Telnet / FTP status.
 
 ### Booting V6 Unix
 

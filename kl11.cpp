@@ -88,6 +88,13 @@ uint32_t serial_in_delay_ms = 0;
 static uint32_t s_last_addchar_ms = 0;
 static bool     s_fifo_drained    = true;   // true at boot -> first char is immediate
 
+// Input receive polling is host-side work, not guest-visible UART timing:
+// it scans sam11's interrupt table, calls millis(), and probes host FIFOs.
+// Doing that every PDP-11 instruction is expensive. Check every N KL11
+// polls instead; output timing below still runs every poll.
+#define KL11_RX_POLL_DIV 100
+static uint8_t  s_rx_poll_div = KL11_RX_POLL_DIV - 1;
+
 void reset()
 {
     TKS = 0;
@@ -98,6 +105,7 @@ void reset()
         g_serial_out.init(serial_out_storage, VPDP_KL11_FIFO_BYTES);
         g_serial_out_inited = true;
     }
+    s_rx_poll_div = KL11_RX_POLL_DIV - 1;
 }
 
 void drain_serial_out()
@@ -192,43 +200,48 @@ void poll()
     // s_fifo_drained: once the host FIFO drains empty (no chars
     // pending), the next arriving char bypasses the delay entirely,
     // so an idle wraparound never matters.
-    bool inttytin_queued = false;
-    for (uint8_t i = 0; i < ITABN; i++) {
-        if (itab[i].vec == 0) break;
-        if (itab[i].vec == INTTTYIN) { inttytin_queued = true; break; }
-    }
-
-    if (!(TKS & 0x80) && !inttytin_queued)
+    if (++s_rx_poll_div >= KL11_RX_POLL_DIV)
     {
-        uint32_t now = millis();
-        bool delay_ok = s_fifo_drained ||
-                        (uint32_t)(now - s_last_addchar_ms) >= serial_in_delay_ms;
-        if (delay_ok)
+        s_rx_poll_div = 0;
+
+        bool inttytin_queued = false;
+        for (uint8_t i = 0; i < ITABN; i++) {
+            if (itab[i].vec == 0) break;
+            if (itab[i].vec == INTTTYIN) { inttytin_queued = true; break; }
+        }
+
+        if (!(TKS & 0x80) && !inttytin_queued)
         {
-            static bool prefer_telnet = false;
-            uint8_t c;
-            bool got;
-            if (prefer_telnet)
-                got = telnet_in_pop(&c) || console_key_pop(&c);
-            else
-                got = console_key_pop(&c) || telnet_in_pop(&c);
-            if (got)
+            uint32_t now = millis();
+            bool delay_ok = s_fifo_drained ||
+                            (uint32_t)(now - s_last_addchar_ms) >= serial_in_delay_ms;
+            if (delay_ok)
             {
-                prefer_telnet = !prefer_telnet;
-                if (c == '\n' || c == '\r')
+                static bool prefer_telnet = false;
+                uint8_t c;
+                bool got;
+                if (prefer_telnet)
+                    got = telnet_in_pop(&c) || console_key_pop(&c);
+                else
+                    got = console_key_pop(&c) || telnet_in_pop(&c);
+                if (got)
                 {
-                    procNS::trapped |= VTRAP_ON_NL;
+                    prefer_telnet = !prefer_telnet;
+                    if (c == '\n' || c == '\r')
+                    {
+                        procNS::trapped |= VTRAP_ON_NL;
+                    }
+                    addchar(c & 0x7F);
+                    s_last_addchar_ms = now;
+                    s_fifo_drained    = false;
                 }
-                addchar(c & 0x7F);
-                s_last_addchar_ms = now;
-                s_fifo_drained    = false;
-            }
-            else
-            {
-                // No host bytes pending. Mark idle so the next arriving
-                // char bypasses the delay (and the millis() wraparound
-                // corner case becomes a non-issue).
-                s_fifo_drained = true;
+                else
+                {
+                    // No host bytes pending. Mark idle so the next arriving
+                    // char bypasses the delay (and the millis() wraparound
+                    // corner case becomes a non-issue).
+                    s_fifo_drained = true;
+                }
             }
         }
     }

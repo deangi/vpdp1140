@@ -15,6 +15,7 @@ void        telnet_write(uint8_t c);    // queue one console-output byte
 bool        telnet_in_pop(uint8_t* out);
 
 bool        telnet_connected();
+bool        telnet_listening();
 const char* telnet_client_ip();          // "" when no client
 uint16_t    telnet_port();
 bool        telnet_enabled();

@@ -65,6 +65,12 @@ void cpu_set_pc(uint16_t pc);
 // count is climbing, this shows which instructions are actually running.
 void cpu_dump_trace(int n_entries);
 
+// Enable/disable the per-instruction trace ring. It is very useful for
+// panic diagnosis, but it costs a full MMU decode + instruction read +
+// register snapshot on every guest instruction, so production boots keep it
+// disabled unless [diag] trace=true.
+void cpu_set_trace(bool enabled);
+
 // Select which boot ROM cpu_reset() will install before transferring control
 // to the boot path. 0 = RL11 (bootrom_rl0, for RL02 packs like XXDP+),
 // 1 = RK11 (bootrom_rk0, for RK05 packs like RT-11 v5). Default is RL.

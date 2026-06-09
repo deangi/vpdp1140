@@ -162,6 +162,7 @@ void telnet_write(uint8_t c) {
 }
 
 bool        telnet_connected() { return g_client && g_client.connected(); }
+bool        telnet_listening() { return g_started && WiFi.status() == WL_CONNECTED; }
 const char* telnet_client_ip() { return g_client_ip; }
 uint16_t    telnet_port()      { return g_port; }
 bool        telnet_enabled()   { return g_enabled; }

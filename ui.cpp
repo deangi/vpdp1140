@@ -3,6 +3,7 @@
 #include "platform.h"
 #include "disk.h"
 #include "telnet.h"
+#include "ftp.h"
 #include "appconfig.h"
 #include <Arduino.h>
 #include <TFT_eSPI.h>
@@ -416,9 +417,9 @@ static void draw_info() {
   char line[64];
   int y = 34;
   const char* title = cfg.title.length() ? cfg.title.c_str() : APP_TITLE;
-  snprintf(line, sizeof(line), "%s  version %s", title, APP_VERSION);
+  snprintf(line, sizeof(line), "%s", title);
   T->drawString(line, 10, y, 2); y += 22;
-  snprintf(line, sizeof(line), "build %s", APP_BUILD_DATE);
+  snprintf(line, sizeof(line), "SW %s  build %s", APP_VERSION, APP_BUILD_DATE);
   T->drawString(line, 10, y, 2); y += 26;
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -439,6 +440,16 @@ static void draw_info() {
              telnet_port(), telnet_client_ip());
   else
     snprintf(line, sizeof(line), "Telnet %u: no client", telnet_port());
+  T->drawString(line, 10, y, 2); y += 22;
+
+  if (!ftp_enabled())
+    snprintf(line, sizeof(line), "FTP: disabled");
+  else if (ftp_connected())
+    snprintf(line, sizeof(line), "FTP %u: client", ftp_port());
+  else if (ftp_listening())
+    snprintf(line, sizeof(line), "FTP %u: listening", ftp_port());
+  else
+    snprintf(line, sizeof(line), "FTP %u: not listening", ftp_port());
   T->drawString(line, 10, y, 2);
 
   draw_nav();

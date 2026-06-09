@@ -23,7 +23,7 @@
 // Board: Freenove ESP32-S3 with 2.8" TFT and capacitive touch screen
 //  (WROVER2 w/8Mb PSRAM, 16Mb flash)
 // Board: ESP32S3 Dev Module
-// Partitioning: Huge App (3mb app, 1mb spiffs)
+// Partitioning: H16mb Flash (3mb program/9.9 spiffs)
 // Need to go to tools : USB CDC on boot - enable, enable OPI PSRAM, set flash to 16MB
 // V1.0 23-May-2026, Dean Gienger, Claude
 // Set up to boot from a RL02 disk (10mb) - eventually support 2 RL02 disks (DL0 and DL1)
@@ -54,6 +54,7 @@
 #include "disk.h"
 #include "console.h"
 #include "telnet.h"
+#include "ftp.h"
 #include "touch.h"
 #include "ui.h"
 
@@ -216,6 +217,7 @@ static void sd_and_config_init() {
   // guest memory access.
   dd11::v4b_quirks_enabled = cfg.v4b_quirks;
   kwp::enabled             = cfg.kwp_enabled;
+  cpu_set_trace(cfg.diag_trace);
   kl11::serial_in_delay_ms = (uint32_t)(cfg.diag_serialdelay_ms < 0 ? 0
                                       : cfg.diag_serialdelay_ms);
 
@@ -303,12 +305,28 @@ static void draw_status_bar() {
   tft.drawString(WiFi.status() == WL_CONNECTED
                    ? WiFi.localIP().toString().c_str() : "WiFi down",
                  158, sy + 6, 1);
-  // TELNET indicator stays anchored to the left of the right column;
+  // TEL/FTP pills match vApple2: dim when unavailable, green when listening,
+  // yellow when a client is connected.
+  auto draw_net_pill = [&](int bx, const char* label, uint16_t col) {
+    tft.fillRoundRect(bx, sy + 22, 26, 15, 2, col);
+    tft.setTextColor(TFT_BLACK, col);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(label, bx + 13, sy + 29, 1);
+  };
+  const uint16_t COL_NET_OFF    = 0x2945;
+  const uint16_t COL_NET_IDLE   = TFT_GREEN;
+  const uint16_t COL_NET_ACTIVE = TFT_YELLOW;
+  uint16_t tel_col = !telnet_listening() ? COL_NET_OFF
+                   : telnet_connected()  ? COL_NET_ACTIVE
+                                         : COL_NET_IDLE;
+  uint16_t ftp_col = !ftp_listening() ? COL_NET_OFF
+                  : ftp_connected()   ? COL_NET_ACTIVE
+                                      : COL_NET_IDLE;
+  draw_net_pill(158, "TEL", tel_col);
+  draw_net_pill(188, "FTP", ftp_col);
+
   // MIPS gets right-aligned to the screen edge via TR_DATUM so it's
   // always at the rightmost column regardless of how many digits.
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString(telnet_connected() ? "TELNET" : "      ",
-                 158, sy + 22, 1);
   char mips_str[16];
   snprintf(mips_str, sizeof(mips_str), "%.2f MIPS", mips);
   tft.setTextDatum(TR_DATUM);
@@ -342,6 +360,10 @@ static void start_cpu(bool cold) {
   // ROM into high memory and cpu_set_pc() to its entry point here.
 
   console_init();
+  for (size_t i = 0; i < cfg.boot_input_len; i++)
+    console_key_push(cfg.boot_input[i]);
+  if (cfg.boot_input_len)
+    LOG("console: injected %u boot input bytes", (unsigned)cfg.boot_input_len);
   console_force_redraw();   // render_task repaints the whole console + status bar
 }
 
@@ -450,6 +472,8 @@ void setup() {
   if (cpu_ok) {
     disks_mount();
     telnet_begin(cfg.telnet_port, cfg.telnet_enabled);
+    ftp_begin(cfg.ftp_port, cfg.ftp_enabled,
+              cfg.ftp_user.c_str(), cfg.ftp_password.c_str());
     pinMode(BUTTON_PIN, INPUT_PULLUP);   // onboard button opens the menu
     touch_init();
     ui_init();
@@ -474,7 +498,7 @@ void setup() {
   }
 }
 
-// loop() runs on core 1 and IS the PDP-11: CPU emulation plus telnet, touch
+// loop() runs on core 1 and IS the PDP-11: CPU emulation plus telnet/FTP, touch
 // and the settings-menu logic. It never touches the TFT - render_task (core
 // 0) owns the display.
 // Touch handling lives at file scope so cpu_run's per-slice work and the
@@ -542,7 +566,7 @@ void loop() {
   if (ui_is_open()) { delay(8); return; }
 
   // Running: feed the keyboard, run the PDP-11 in small slices, service
-  // telnet between slices so the network console stays responsive, and
+  // telnet/FTP between slices so the network services stay responsive, and
   // drain the KL11->host output FIFOs (USB-Serial + TFT) so the 8 KB
   // rings stay near empty during steady-state output. Telnet's TX FIFO
   // is drained inside telnet_poll().
@@ -555,11 +579,13 @@ void loop() {
     while (Serial.available())
       console_key_push((uint8_t)Serial.read());   // -> Serial-in FIFO
     telnet_poll();               // accept + RX -> Telnet-in FIFO, flush TX FIFO
+    ftp_poll();                  // accept + FTP commands/data against SD root
     cpu_run(8000);
     console_drain_tft();         // TFT-out FIFO -> ANSI parser -> cell grid
     kl11::drain_serial_out();    // Serial-out FIFO -> Serial.write
   }
   telnet_poll();
+  ftp_poll();
   console_drain_tft();
   kl11::drain_serial_out();
 

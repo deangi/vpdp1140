@@ -53,7 +53,7 @@ struct TraceEntry {
 #define TRACE_RING_SIZE 512
 static TraceEntry s_trace_ring[TRACE_RING_SIZE];
 static uint32_t   s_trace_idx = 0;  // next write slot
-static bool       s_trace_enable = true;
+static bool       s_trace_enable = false;
 
 // ---- ring of last N traps (synchronous: bus error, reserved instr, EMT,
 // TRAP, IOT, BPT, ...). Records the source PC and the new PC the vector
@@ -372,6 +372,7 @@ uint32_t cpu_run(uint32_t max_cycles) {
 }
 
 void cpu_request_halt() { s_halt_requested = true; }
+void cpu_set_trace(bool enabled) { s_trace_enable = enabled; }
 
 uint8_t* cpu_mem()       { return s_mem; }
 uint32_t cpu_mem_size()  { return VPDP_RAM_SIZE; }

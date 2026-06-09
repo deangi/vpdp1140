@@ -21,6 +21,136 @@ static String to_lower(const String& s) {
   return t;
 }
 
+static bool truthy(const String& s) {
+  return s.equalsIgnoreCase("true") ||
+         s == "1" ||
+         s.equalsIgnoreCase("yes") ||
+         s.equalsIgnoreCase("on");
+}
+
+static int hex_value(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+static String strip_inline_comment(const String& val) {
+  bool in_quote = false;
+  char quote = 0;
+  bool escaped = false;
+  for (int i = 0; i < (int)val.length(); i++) {
+    char c = val[i];
+    if (escaped) { escaped = false; continue; }
+    if (c == '\\') { escaped = true; continue; }
+    if (in_quote) {
+      if (c == quote) in_quote = false;
+      continue;
+    }
+    if (c == '"' || c == '\'') {
+      in_quote = true;
+      quote = c;
+      continue;
+    }
+    if (c == ';' || c == '#') return trim(val.substring(0, i));
+  }
+  return trim(val);
+}
+
+static String unquote_config_value(const String& val) {
+  if (val.length() >= 2) {
+    char q = val[0];
+    if ((q == '"' || q == '\'') && val[val.length() - 1] == q)
+      return val.substring(1, val.length() - 1);
+  }
+  return val;
+}
+
+static void config_set_boot_input(AppConfig& cfg, const String& encoded) {
+  cfg.boot_input_len = 0;
+  String s = unquote_config_value(encoded);
+
+  for (int i = 0; i < (int)s.length() &&
+                  cfg.boot_input_len < AppConfig::BOOT_INPUT_MAX; i++) {
+    uint8_t out = (uint8_t)s[i];
+
+    if (s[i] == '^' && i + 1 < (int)s.length()) {
+      char c = s[++i];
+      if (c == '?') out = 0x7f;
+      else          out = ((uint8_t)c) & 0x1f;
+    } else if (s[i] == '\\' && i + 1 < (int)s.length()) {
+      char c = s[++i];
+      switch (c) {
+        case 'r': out = '\r'; break;
+        case 'n': out = '\n'; break;
+        case 't': out = '\t'; break;
+        case 'b': out = '\b'; break;
+        case 'f': out = '\f'; break;
+        case 'e': out = 0x1b; break;
+        case 's': out = ' ';  break;
+        case '\\': out = '\\'; break;
+        case '"': out = '"'; break;
+        case '\'': out = '\''; break;
+        case 'x': {
+          int v = 0;
+          int digits = 0;
+          while (i + 1 < (int)s.length() && digits < 2) {
+            int h = hex_value(s[i + 1]);
+            if (h < 0) break;
+            v = (v << 4) | h;
+            i++;
+            digits++;
+          }
+          out = (uint8_t)v;
+          break;
+        }
+        default:
+          if (c >= '0' && c <= '7') {
+            int v = c - '0';
+            int digits = 1;
+            while (i + 1 < (int)s.length() && digits < 3 &&
+                   s[i + 1] >= '0' && s[i + 1] <= '7') {
+              v = (v << 3) | (s[i + 1] - '0');
+              i++;
+              digits++;
+            }
+            out = (uint8_t)v;
+          } else {
+            out = (uint8_t)c;
+          }
+          break;
+      }
+    }
+
+    cfg.boot_input[cfg.boot_input_len++] = out;
+  }
+}
+
+static String escaped_bytes(const uint8_t* bytes, size_t len) {
+  String out;
+  char tmp[6];
+  for (size_t i = 0; i < len; i++) {
+    uint8_t c = bytes[i];
+    switch (c) {
+      case '\r': out += "\\r"; break;
+      case '\n': out += "\\n"; break;
+      case '\t': out += "\\t"; break;
+      case '\b': out += "\\b"; break;
+      case 0x1b: out += "\\e"; break;
+      case '\\': out += "\\\\"; break;
+      case '"':  out += "\\\""; break;
+      default:
+        if (c >= 32 && c < 127) out += (char)c;
+        else {
+          snprintf(tmp, sizeof(tmp), "\\x%02X", c);
+          out += tmp;
+        }
+        break;
+    }
+  }
+  return out;
+}
+
 // -------- SD --------
 
 bool sd_mount() {
@@ -57,8 +187,16 @@ void config_apply_compiled_defaults(AppConfig& cfg) {
   cfg.telnet_enabled = true;
   cfg.telnet_port    = TELNET_PORT;
 
+  cfg.boot_input_len = 0;
+
+  cfg.ftp_enabled    = true;
+  cfg.ftp_port       = FTP_PORT;
+  cfg.ftp_user       = FTP_DEFAULT_USER;
+  cfg.ftp_password   = FTP_DEFAULT_PASS;
+
   cfg.diag_pcping_sec = 5;
   cfg.diag_serialdelay_ms = 20;
+  cfg.diag_trace      = false;
   cfg.v4b_quirks      = true;
   cfg.kwp_enabled     = false;
 
@@ -85,13 +223,7 @@ static void parse_line(AppConfig& cfg, String& section, const String& raw) {
   if (eq < 0) return;
 
   String key = to_lower(trim(t.substring(0, eq)));
-  String val = trim(t.substring(eq + 1));
-  // Strip trailing inline comments
-  int hashOrSemi = -1;
-  for (int i = 0; i < (int)val.length(); i++) {
-    if (val[i] == ';' || val[i] == '#') { hashOrSemi = i; break; }
-  }
-  if (hashOrSemi >= 0) val = trim(val.substring(0, hashOrSemi));
+  String val = strip_inline_comment(t.substring(eq + 1));
 
   if (section == "system") {
     if      (key == "title")    cfg.title   = val;
@@ -102,16 +234,22 @@ static void parse_line(AppConfig& cfg, String& section, const String& raw) {
     else if (key == "password") cfg.wifi_password = val;
     else if (key == "hostname") cfg.wifi_hostname = val;
   } else if (section == "telnet") {
-    if      (key == "enabled")  cfg.telnet_enabled = (val.equalsIgnoreCase("true") ||
-                                                     val == "1" ||
-                                                     val.equalsIgnoreCase("yes") ||
-                                                     val.equalsIgnoreCase("on"));
+    if      (key == "enabled")  cfg.telnet_enabled = truthy(val);
     else if (key == "port")     cfg.telnet_port = val.toInt();
+  } else if (section == "console") {
+    if      (key == "boot_input" || key == "typeahead" || key == "boot_keys")
+      config_set_boot_input(cfg, val);
+  } else if (section == "ftp") {
+    if      (key == "enabled")  cfg.ftp_enabled  = truthy(val);
+    else if (key == "port")     cfg.ftp_port     = val.toInt();
+    else if (key == "user")     cfg.ftp_user     = val;
+    else if (key == "password") cfg.ftp_password = val;
   } else if (section == "diag" || section == "emu") {
     // "emu" kept as an alias for back-compat with the first revision of
     // the parser; "diag" is the canonical section going forward.
     if      (key == "pcping")     cfg.diag_pcping_sec = val.toInt();
     else if (key == "serialdelay") cfg.diag_serialdelay_ms = val.toInt();
+    else if (key == "trace")      cfg.diag_trace = truthy(val);
     else if (key == "v4b_quirks") cfg.v4b_quirks = (val.equalsIgnoreCase("true") ||
                                                    val == "1" ||
                                                    val.equalsIgnoreCase("yes") ||
@@ -190,6 +328,8 @@ bool config_load_wifi(AppConfig& cfg) {
   if (cfg.wifi_ssid.length() == 0)     cfg.wifi_ssid     = WIFI_SSID;
   if (cfg.wifi_password.length() == 0) cfg.wifi_password = WIFI_PASS;
   if (cfg.wifi_hostname.length() == 0) cfg.wifi_hostname = WIFI_HOSTNAME;
+  if (cfg.ftp_user.length() == 0)      cfg.ftp_user      = FTP_DEFAULT_USER;
+  if (cfg.ftp_password.length() == 0)  cfg.ftp_password  = FTP_DEFAULT_PASS;
   return true;
 }
 
@@ -201,6 +341,7 @@ bool config_load_pdp(AppConfig& cfg) {
   cfg.disk_c = "";
   cfg.disk_d = "";
   cfg.disk_rk0 = "";
+  cfg.boot_input_len = 0;
 
   bool existed = parse_config_file(cfg, PDP_CFG_PATH);
   if (!existed) {
@@ -229,6 +370,13 @@ bool config_write_default_wifi(const AppConfig& cfg) {
   f.println("ssid     = ");
   f.println("password = ");
   f.printf("hostname = %s\r\n", cfg.wifi_hostname.c_str());
+  f.println();
+  f.println("[ftp]");
+  f.println("; FTP exposes the SD card root. Passive data uses port+1.");
+  f.printf("enabled  = %s\r\n", cfg.ftp_enabled ? "true" : "false");
+  f.printf("port     = %d\r\n", cfg.ftp_port);
+  f.printf("user     = %s\r\n", cfg.ftp_user.c_str());
+  f.printf("password = %s\r\n", cfg.ftp_password.c_str());
   f.close();
   LOG("Wrote default %s", WIFI_CFG_PATH);
   return true;
@@ -253,6 +401,11 @@ bool config_write_default_pdp(const AppConfig& cfg) {
   f.printf("enabled = %s\r\n", cfg.telnet_enabled ? "true" : "false");
   f.printf("port    = %d\r\n", cfg.telnet_port);
   f.println();
+  f.println("[console]");
+  f.println("; boot_input is injected into the KL11 input queue after each");
+  f.println("; PDP-11 boot/reset. Escapes: \\r \\n \\t \\e \\xHH \\ooo ^C ^[ ^?.");
+  f.printf("boot_input = \"%s\"\r\n", escaped_bytes(cfg.boot_input, cfg.boot_input_len).c_str());
+  f.println();
   f.println("[diag]");
   f.println("; pcping      = seconds between host's periodic PC/register dump");
   f.println(";               to USB-Serial. 0 disables it (so do large values).");
@@ -274,8 +427,11 @@ bool config_write_default_pdp(const AppConfig& cfg) {
   f.println(";               and reverse the order). 0 disables; 10-50 ms");
   f.println(";               typical for V6 / RT-11 / RSTS under a line-");
   f.println(";               buffered host (Arduino IDE Serial Monitor).");
+  f.println("; trace       = per-instruction panic trace ring. Expensive:");
+  f.println(";               set true only when chasing a HALT/panic.");
   f.printf("pcping      = %d\r\n", cfg.diag_pcping_sec);
   f.printf("serialdelay = %d\r\n", cfg.diag_serialdelay_ms);
+  f.printf("trace       = %s\r\n", cfg.diag_trace ? "true" : "false");
   f.printf("v4b_quirks  = %s\r\n", cfg.v4b_quirks ? "true" : "false");
   f.printf("kwp_enabled = %s\r\n", cfg.kwp_enabled ? "true" : "false");
   f.println();
@@ -467,9 +623,16 @@ void config_print(const AppConfig& cfg) {
       (int)cfg.wifi_password.length());
   LOG("[telnet]  enabled=%s  port=%d",
       cfg.telnet_enabled ? "true" : "false", cfg.telnet_port);
-  LOG("[diag]    pcping=%d sec%s  serialdelay=%d ms  v4b_quirks=%s  kwp_enabled=%s",
+  LOG("[console] boot_input=\"%s\" (%u bytes)",
+      escaped_bytes(cfg.boot_input, cfg.boot_input_len).c_str(),
+      (unsigned)cfg.boot_input_len);
+  LOG("[ftp]     enabled=%s  port=%d  user=\"%s\" (password=%d chars)",
+      cfg.ftp_enabled ? "true" : "false", cfg.ftp_port,
+      cfg.ftp_user.c_str(), (int)cfg.ftp_password.length());
+  LOG("[diag]    pcping=%d sec%s  serialdelay=%d ms  trace=%s  v4b_quirks=%s  kwp_enabled=%s",
       cfg.diag_pcping_sec, cfg.diag_pcping_sec <= 0 ? " (disabled)" : "",
       cfg.diag_serialdelay_ms,
+      cfg.diag_trace ? "true" : "false",
       cfg.v4b_quirks  ? "true" : "false",
       cfg.kwp_enabled ? "true (V7 mode)" : "false (V4B-safe)");
   const char* boot_name;
