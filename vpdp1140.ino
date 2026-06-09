@@ -21,7 +21,7 @@
 // User_Setup_Select.h (this is the same setup used by all Freenove
 // tutorials for this board).
 // Board: Freenove ESP32-S3 with 2.8" TFT and capacitive touch screen
-//  (WROVER2 w/PSRAM, 4Mb flash)
+//  (WROVER2 w/8Mb PSRAM, 16Mb flash)
 // Board: ESP32S3 Dev Module
 // Partitioning: Huge App (3mb app, 1mb spiffs)
 // Need to go to tools : USB CDC on boot - enable, enable OPI PSRAM, set flash to 16MB

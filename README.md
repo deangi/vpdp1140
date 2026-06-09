@@ -1,9 +1,9 @@
-# vpdp1140 — a DEC PDP-11/40 emulator for the load 1.bESP32-S3
+# vpdp1140 — a DEC PDP-11/40 emulator for the ESP32-S3 with a touch screen display.
 
 A **Freenove ESP32-S3 2.8" Display** board turned into a tiny DEC
 PDP-11/40 that boots **V6 Unix** from an SD-card disk image. The console
 appears on the onboard TFT, on Telnet, and on USB-Serial — all three live
-simultaneously.
+simultaneously.  Also boots RT-11, and an early version of RSTS.
 
 ```
             +------------------------------+
