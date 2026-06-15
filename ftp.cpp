@@ -1,5 +1,6 @@
 #include "ftp.h"
 #include "platform.h"
+#include "disk.h"
 #include "SD_FTP_Server/src/SD_FTP_Server.h"
 
 // vApple2 boots the FTP server with a project-wide "enabled" gate that
@@ -11,6 +12,22 @@ static bool s_enabled = false;
 static void ftp_log_info(const char* m) { LOG ("%s", m); }
 static void ftp_log_err (const char* m) { LOGE("%s", m); }
 
+static bool ftp_path_protected(const char* path) {
+  if (!path || !*path) return false;
+  SD_FTP_StorageGuard guard;
+  String candidate(path);
+  candidate.toLowerCase();
+  for (int slot = 0; slot < DRIVE_COUNT; slot++) {
+    if (!disk_is_mounted(slot)) continue;
+    String image(disk_path(slot));
+    if (!image.startsWith("/")) image = "/" + image;
+    image.toLowerCase();
+    if (image == candidate) return true;
+    if (candidate != "/" && image.startsWith(candidate + "/")) return true;
+  }
+  return false;
+}
+
 void ftp_begin(uint16_t port, bool enabled, const char* user, const char* pass) {
   s_enabled = enabled;
   if (!enabled) { LOG("ftp: disabled in config"); return; }
@@ -21,6 +38,7 @@ void ftp_begin(uint16_t port, bool enabled, const char* user, const char* pass) 
   cfg.vfs_root   = "/sdcard";
   cfg.log_fn     = ftp_log_info;
   cfg.log_err_fn = ftp_log_err;
+  cfg.path_protected_fn = ftp_path_protected;
   SDFTPServer.begin(cfg);
 }
 

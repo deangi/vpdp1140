@@ -6,6 +6,8 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include "esp_attr.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #ifndef EXT_RAM_BSS_ATTR
 #define EXT_RAM_BSS_ATTR
@@ -23,6 +25,7 @@ static bool        g_configured = false;
 static WiFiServer  g_ctrl_server(21);
 static WiFiClient  g_ctrl_client;
 static bool        g_started    = false;
+static bool        g_client_active = false;
 
 // Passive-mode data channel: server listens, client connects to us.
 static WiFiServer  g_pasv_server(0);
@@ -40,6 +43,12 @@ static bool        g_port_armed = false;
 static bool        g_logged_in  = false;
 static char        g_cwd[128]   = "/";     // FTP-side current directory
 static char        g_rnfr[128]  = {0};     // pending RNFR source
+static char        g_linebuf[256];
+static size_t      g_linelen    = 0;
+static bool        g_line_overflow = false;
+static SemaphoreHandle_t g_storage_mutex = nullptr;
+static StaticSemaphore_t g_storage_mutex_buffer;
+static portMUX_TYPE g_storage_mutex_init_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // 4 KiB transfer buffer in PSRAM. Tuned empirically for SD_MMC throughput;
 // smaller starves the bus, larger gains nothing on PSRAM-backed memory.
@@ -80,56 +89,106 @@ static void send_replyf(const char* fmt, ...) {
   send_reply(buf);
 }
 
+static void copy_string(char* dst, size_t dstsz, const char* src) {
+  if (!dst || dstsz == 0) return;
+  snprintf(dst, dstsz, "%s", src ? src : "");
+}
+
+static bool same_ip(const IPAddress& a, const IPAddress& b) {
+  return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3];
+}
+
+static bool path_is_protected(const char* ftp_path) {
+  return g_cfg.path_protected_fn && g_cfg.path_protected_fn(ftp_path);
+}
+
+static bool data_write_all(const uint8_t* data, size_t bytes) {
+  size_t sent = 0;
+  uint32_t last_progress = millis();
+  while (sent < bytes) {
+    if (!g_pasv_data.connected()) return false;
+    size_t n = g_pasv_data.write(data + sent, bytes - sent);
+    if (n > 0) {
+      sent += n;
+      last_progress = millis();
+    } else {
+      if (millis() - last_progress > 10000) return false;
+      delay(2);
+    }
+  }
+  return true;
+}
+
 // Normalize an FTP-side path into a canonical absolute form under "/".
 // Handles "..", ".", duplicate slashes, and the difference between absolute
 // arguments ("/foo") and relative ones ("foo", "./foo"). Result always starts
 // with "/" and never contains ".." or trailing slash (except for "/").
-static void normalize_ftp_path(const char* in, char* out, size_t outsz) {
+static bool normalize_ftp_path(const char* in, char* out, size_t outsz) {
+  if (!out || outsz < 2) return false;
   char tmp[256];
-  if (!in || in[0] == 0) { snprintf(tmp, sizeof(tmp), "%s", g_cwd); }
-  else if (in[0] == '/') { snprintf(tmp, sizeof(tmp), "%s",        in); }
-  else                   { snprintf(tmp, sizeof(tmp), "%s/%s", g_cwd, in); }
+  int n;
+  if (!in || in[0] == 0) n = snprintf(tmp, sizeof(tmp), "%s", g_cwd);
+  else if (in[0] == '/') n = snprintf(tmp, sizeof(tmp), "%s", in);
+  else                   n = snprintf(tmp, sizeof(tmp), "%s/%s", g_cwd, in);
+  if (n < 0 || (size_t)n >= sizeof(tmp)) return false;
 
-  char* stack[16];
+  char* stack[32];
   int   depth = 0;
   char* p = tmp;
-  while (*p == '/') p++;
   while (*p) {
+    while (*p == '/') p++;
+    if (!*p) break;
     char* comp = p;
     while (*p && *p != '/') p++;
-    char saved = *p;
-    *p = 0;
+    if (*p) *p++ = 0;
     if (comp[0] == 0 || (comp[0] == '.' && comp[1] == 0)) {
       // empty or "." -- skip
     } else if (comp[0] == '.' && comp[1] == '.' && comp[2] == 0) {
       if (depth > 0) depth--;
-    } else if (depth < (int)(sizeof(stack)/sizeof(stack[0]))) {
+    } else if (depth < (int)(sizeof(stack) / sizeof(stack[0]))) {
       stack[depth++] = comp;
+    } else {
+      return false;
     }
-    *p = saved;
-    while (*p == '/') p++;
   }
 
+  size_t needed = 1;
+  for (int i = 0; i < depth; i++)
+    needed += strlen(stack[i]) + (i + 1 < depth ? 1 : 0);
+  if (needed >= outsz) return false;
+
   char* w = out;
-  char* end = out + outsz - 1;
   *w++ = '/';
-  for (int i = 0; i < depth && w < end; i++) {
+  for (int i = 0; i < depth; i++) {
     const char* s = stack[i];
-    while (*s && w < end) *w++ = *s++;
-    if (i + 1 < depth && w < end) *w++ = '/';
+    while (*s) *w++ = *s++;
+    if (i + 1 < depth) *w++ = '/';
   }
   *w = 0;
+  return true;
 }
 
 // Convert an already-normalized FTP path into the VFS path used by POSIX:
 // "/" -> "<vfs_root>", "/foo" -> "<vfs_root>/foo".
-static void vfs_path_of(const char* ftp_path, char* out, size_t outsz) {
+static bool vfs_path_of(const char* ftp_path, char* out, size_t outsz) {
   const char* root = g_cfg.vfs_root ? g_cfg.vfs_root : "/sdcard";
+  int n;
   if (!ftp_path || ftp_path[0] == 0 || (ftp_path[0] == '/' && ftp_path[1] == 0)) {
-    snprintf(out, outsz, "%s", root);
+    n = snprintf(out, outsz, "%s", root);
   } else {
-    snprintf(out, outsz, "%s%s", root, ftp_path);
+    n = snprintf(out, outsz, "%s%s", root, ftp_path);
   }
+  return n >= 0 && (size_t)n < outsz;
+}
+
+static bool resolve_path(const char* arg, char* ftp_path, size_t ftp_size,
+                         char* vfs_path, size_t vfs_size) {
+  if (!normalize_ftp_path(arg, ftp_path, ftp_size) ||
+      !vfs_path_of(ftp_path, vfs_path, vfs_size)) {
+    send_reply("553 Path too long");
+    return false;
+  }
+  return true;
 }
 
 // ---- Lifecycle ------------------------------------------------------------
@@ -137,11 +196,14 @@ static void close_client_state() {
   if (g_pasv_armed) { g_pasv_server.stop(); g_pasv_armed = false; g_pasv_port = 0; }
   if (g_pasv_data)  { g_pasv_data.stop(); }
   if (g_ctrl_client){ g_ctrl_client.stop(); }
+  g_client_active = false;
   g_port_armed = false;
   g_port_port  = 0;
   g_logged_in  = false;
   g_rnfr[0]    = 0;
-  strncpy(g_cwd, "/", sizeof(g_cwd));
+  copy_string(g_cwd, sizeof(g_cwd), "/");
+  g_linelen = 0;
+  g_line_overflow = false;
 }
 
 static bool start_listener() {
@@ -180,8 +242,19 @@ static void cmd_port(const char* arg) {
   if (sscanf(arg, "%u,%u,%u,%u,%u,%u", &a, &b, &c, &d, &p1, &p2) != 6) {
     send_reply("501 Bad PORT syntax"); return;
   }
-  g_port_addr  = IPAddress(a, b, c, d);
-  g_port_port  = (uint16_t)(p1 * 256 + p2);
+  if (a > 255 || b > 255 || c > 255 || d > 255 || p1 > 255 || p2 > 255) {
+    send_reply("501 Bad PORT address"); return;
+  }
+  IPAddress requested(a, b, c, d);
+  uint16_t requested_port = (uint16_t)(p1 * 256 + p2);
+  if (!g_ctrl_client || !same_ip(requested, g_ctrl_client.remoteIP())) {
+    send_reply("501 PORT address must match control client"); return;
+  }
+  if (requested_port == 0) {
+    send_reply("501 Bad PORT number"); return;
+  }
+  g_port_addr  = requested;
+  g_port_port  = requested_port;
   g_port_armed = true;
   // PASV and PORT are mutually exclusive; arming PORT cancels any pending PASV.
   if (g_pasv_armed) { g_pasv_server.stop(); g_pasv_armed = false; g_pasv_port = 0; }
@@ -239,26 +312,30 @@ static void format_unix_perms(char* out, mode_t m) {
 
 static void cmd_list(const char* arg, bool name_only) {
   char ftp_path[160];
-  normalize_ftp_path(arg, ftp_path, sizeof(ftp_path));
   char vfs[180];
-  vfs_path_of(ftp_path, vfs, sizeof(vfs));
+  if (!resolve_path(arg, ftp_path, sizeof(ftp_path), vfs, sizeof(vfs))) return;
 
+  if (!open_data()) return;
+  SD_FTP_StorageGuard guard;
   DIR* d = opendir(vfs);
   if (!d) {
+    close_data();
     send_replyf("550 Can't open directory: %s", ftp_path);
     return;
   }
-  if (!open_data()) { closedir(d); return; }
   send_reply("150 Opening data connection");
 
   struct dirent* ent;
   uint32_t count = 0;
+  bool ok = true;
   while ((ent = readdir(d)) != nullptr) {
     if (ent->d_name[0] == '.' && (ent->d_name[1] == 0 ||
         (ent->d_name[1] == '.' && ent->d_name[2] == 0))) continue;
     if (name_only) {
-      g_pasv_data.print(ent->d_name);
-      g_pasv_data.print("\r\n");
+      char line[300];
+      int n = snprintf(line, sizeof(line), "%s\r\n", ent->d_name);
+      ok = n >= 0 && (size_t)n < sizeof(line) &&
+           data_write_all((const uint8_t*)line, (size_t)n);
     } else {
       char child[300];
       snprintf(child, sizeof(child), "%s/%s", vfs, ent->d_name);
@@ -268,114 +345,190 @@ static void cmd_list(const char* arg, bool name_only) {
       format_unix_perms(perms, st.st_mode);
       // Date fixed to "Jan 01 00:00" — FAT SD timestamps round-trip poorly
       // through ESP-IDF and FileZilla tolerates the placeholder fine.
-      g_pasv_data.printf("%s 1 esp32 esp32 %ld Jan 01 00:00 %s\r\n",
-                         perms, (long)st.st_size, ent->d_name);
+      char line[384];
+      int n = snprintf(line, sizeof(line),
+                       "%s 1 esp32 esp32 %ld Jan 01 00:00 %s\r\n",
+                       perms, (long)st.st_size, ent->d_name);
+      ok = n >= 0 && (size_t)n < sizeof(line) &&
+           data_write_all((const uint8_t*)line, (size_t)n);
     }
+    if (!ok) break;
     count++;
   }
   closedir(d);
   close_data();
-  send_replyf("226 Transfer complete (%u entries)", (unsigned)count);
+  if (ok) send_replyf("226 Transfer complete (%u entries)", (unsigned)count);
+  else    send_reply("426 Data connection failed");
 }
 
 // ---- RETR / STOR ----------------------------------------------------------
 static void cmd_retr(const char* arg) {
   char ftp_path[160];
-  normalize_ftp_path(arg, ftp_path, sizeof(ftp_path));
   char vfs[180];
-  vfs_path_of(ftp_path, vfs, sizeof(vfs));
+  if (!resolve_path(arg, ftp_path, sizeof(ftp_path), vfs, sizeof(vfs))) return;
+  if (path_is_protected(ftp_path)) {
+    send_reply("450 File is mounted by the emulator"); return;
+  }
 
+  if (!open_data()) return;
+  SD_FTP_StorageGuard guard;
+  if (path_is_protected(ftp_path)) {
+    close_data();
+    send_reply("450 File is mounted by the emulator");
+    return;
+  }
   FILE* f = fopen(vfs, "rb");
-  if (!f) { send_replyf("550 File not found: %s", ftp_path); return; }
-  if (!open_data()) { fclose(f); return; }
+  if (!f) {
+    close_data();
+    send_replyf("550 File not found: %s", ftp_path);
+    return;
+  }
   send_replyf("150 Opening BINARY data for %s", ftp_path);
 
   size_t total = 0;
+  bool ok = true;
   while (true) {
     size_t n = fread(g_xfer_buf, 1, sizeof(g_xfer_buf), f);
-    if (n == 0) break;
-    size_t w = g_pasv_data.write(g_xfer_buf, n);
-    if (w != n) { log_err("ftp: RETR short write %u/%u", (unsigned)w, (unsigned)n); break; }
+    if (n == 0) {
+      if (ferror(f)) ok = false;
+      break;
+    }
+    if (!data_write_all(g_xfer_buf, n)) {
+      log_err("ftp: RETR data connection failed after %u bytes", (unsigned)total);
+      ok = false;
+      break;
+    }
     total += n;
   }
   fclose(f);
   close_data();
-  send_replyf("226 Transfer complete (%u bytes)", (unsigned)total);
+  if (ok) send_replyf("226 Transfer complete (%u bytes)", (unsigned)total);
+  else    send_reply("426 Transfer aborted");
 }
 
 // STOR overwrites, APPE appends — otherwise identical. Single body keeps the
 // data-channel handling and timeout policy in one place.
 static void cmd_stor_or_appe(const char* arg, bool append) {
   char ftp_path[160];
-  normalize_ftp_path(arg, ftp_path, sizeof(ftp_path));
   char vfs[180];
-  vfs_path_of(ftp_path, vfs, sizeof(vfs));
+  if (!resolve_path(arg, ftp_path, sizeof(ftp_path), vfs, sizeof(vfs))) return;
+  if (path_is_protected(ftp_path)) {
+    send_reply("450 File is mounted by the emulator"); return;
+  }
 
+  if (!open_data()) return;
+  SD_FTP_StorageGuard guard;
+  if (path_is_protected(ftp_path)) {
+    close_data();
+    send_reply("450 File is mounted by the emulator");
+    return;
+  }
   FILE* f = fopen(vfs, append ? "ab" : "wb");
-  if (!f) { send_replyf("550 Can't create: %s", ftp_path); return; }
-  if (!open_data()) { fclose(f); return; }
+  if (!f) {
+    close_data();
+    send_replyf("550 Can't create: %s", ftp_path);
+    return;
+  }
   send_replyf("150 Opening BINARY data for %s", ftp_path);
 
   size_t total = 0;
+  bool ok = true;
+  bool local_error = false;
   // Read with a small per-iteration timeout so a stalled client can't hang us.
   uint32_t last_data = millis();
   while (g_pasv_data.connected() || g_pasv_data.available()) {
     int n = g_pasv_data.read(g_xfer_buf, sizeof(g_xfer_buf));
     if (n > 0) {
-      fwrite(g_xfer_buf, 1, (size_t)n, f);
+      size_t written = fwrite(g_xfer_buf, 1, (size_t)n, f);
+      if (written != (size_t)n) {
+        log_err("ftp: STOR SD write failed %u/%u",
+                (unsigned)written, (unsigned)n);
+        ok = false;
+        local_error = true;
+        break;
+      }
       total += (size_t)n;
       last_data = millis();
     } else {
-      if (millis() - last_data > 10000) break;
+      if (millis() - last_data > 10000) {
+        ok = false;
+        break;
+      }
       delay(2);
     }
   }
-  fclose(f);
+  if (fflush(f) != 0 || ferror(f)) { ok = false; local_error = true; }
+  if (fclose(f) != 0)              { ok = false; local_error = true; }
   close_data();
-  send_replyf("226 Transfer complete (%u bytes)", (unsigned)total);
+  if (ok)               send_replyf("226 Transfer complete (%u bytes)", (unsigned)total);
+  else if (local_error) send_reply("451 Local storage error");
+  else                  send_reply("426 Transfer aborted");
 }
 
 // ---- Other simple commands ------------------------------------------------
 static void cmd_dele(const char* arg) {
-  char p[160]; normalize_ftp_path(arg, p, sizeof(p));
-  char vfs[180]; vfs_path_of(p, vfs, sizeof(vfs));
+  char p[160], vfs[180];
+  if (!resolve_path(arg, p, sizeof(p), vfs, sizeof(vfs))) return;
+  SD_FTP_StorageGuard guard;
+  if (path_is_protected(p)) { send_reply("450 File is mounted by the emulator"); return; }
   send_replyf(unlink(vfs) == 0 ? "250 Deleted: %s" : "550 Delete failed: %s", p);
 }
 static void cmd_mkd(const char* arg) {
-  char p[160]; normalize_ftp_path(arg, p, sizeof(p));
-  char vfs[180]; vfs_path_of(p, vfs, sizeof(vfs));
+  char p[160], vfs[180];
+  if (!resolve_path(arg, p, sizeof(p), vfs, sizeof(vfs))) return;
+  SD_FTP_StorageGuard guard;
   send_replyf(mkdir(vfs, 0755) == 0 ? "257 \"%s\" created" : "550 mkdir failed: %s", p);
 }
 static void cmd_rmd(const char* arg) {
-  char p[160]; normalize_ftp_path(arg, p, sizeof(p));
-  char vfs[180]; vfs_path_of(p, vfs, sizeof(vfs));
+  char p[160], vfs[180];
+  if (!resolve_path(arg, p, sizeof(p), vfs, sizeof(vfs))) return;
+  SD_FTP_StorageGuard guard;
+  if (path_is_protected(p)) { send_reply("450 Directory contains a mounted image"); return; }
   send_replyf(rmdir(vfs) == 0 ? "250 Removed: %s" : "550 rmdir failed: %s", p);
 }
 static void cmd_cwd(const char* arg) {
-  char p[160]; normalize_ftp_path(arg, p, sizeof(p));
-  char vfs[180]; vfs_path_of(p, vfs, sizeof(vfs));
+  char p[160], vfs[180];
+  if (!resolve_path(arg, p, sizeof(p), vfs, sizeof(vfs))) return;
+  SD_FTP_StorageGuard guard;
   struct stat st{};
   if (stat(vfs, &st) == 0 && S_ISDIR(st.st_mode)) {
-    strncpy(g_cwd, p, sizeof(g_cwd));
+    if (strlen(p) >= sizeof(g_cwd)) { send_reply("553 Path too long"); return; }
+    copy_string(g_cwd, sizeof(g_cwd), p);
     send_replyf("250 Directory changed to %s", g_cwd);
   } else {
     send_replyf("550 Not a directory: %s", p);
   }
 }
 static void cmd_rnfr(const char* arg) {
-  char p[160]; normalize_ftp_path(arg, p, sizeof(p));
-  char vfs[180]; vfs_path_of(p, vfs, sizeof(vfs));
+  char p[160], vfs[180];
+  if (!resolve_path(arg, p, sizeof(p), vfs, sizeof(vfs))) return;
+  if (strlen(p) >= sizeof(g_rnfr)) { send_reply("553 Path too long"); return; }
+  SD_FTP_StorageGuard guard;
+  if (path_is_protected(p)) { send_reply("450 Path is mounted by the emulator"); return; }
   struct stat st{};
   if (stat(vfs, &st) != 0) { send_replyf("550 No such file: %s", p); return; }
-  strncpy(g_rnfr, p, sizeof(g_rnfr));
+  copy_string(g_rnfr, sizeof(g_rnfr), p);
   send_reply("350 Ready for RNTO");
 }
 static void cmd_rnto(const char* arg) {
   if (!g_rnfr[0]) { send_reply("503 RNFR first"); return; }
-  char p[160]; normalize_ftp_path(arg, p, sizeof(p));
-  char vfs_from[180], vfs_to[180];
-  vfs_path_of(g_rnfr, vfs_from, sizeof(vfs_from));
-  vfs_path_of(p,      vfs_to,   sizeof(vfs_to));
+  char p[160], vfs_to[180];
+  if (!resolve_path(arg, p, sizeof(p), vfs_to, sizeof(vfs_to))) {
+    g_rnfr[0] = 0;
+    return;
+  }
+  SD_FTP_StorageGuard guard;
+  if (path_is_protected(g_rnfr) || path_is_protected(p)) {
+    g_rnfr[0] = 0;
+    send_reply("450 Rename path is mounted by the emulator");
+    return;
+  }
+  char vfs_from[180];
+  if (!vfs_path_of(g_rnfr, vfs_from, sizeof(vfs_from))) {
+    g_rnfr[0] = 0;
+    send_reply("553 Path too long");
+    return;
+  }
   bool ok = (rename(vfs_from, vfs_to) == 0);
   g_rnfr[0] = 0;
   send_replyf(ok ? "250 Renamed to %s" : "550 Rename failed: %s", p);
@@ -439,6 +592,8 @@ static void handle_command_line(char* line) {
 
 // ---- Public class methods -------------------------------------------------
 void SD_FTP_Server::begin(const Config& cfg) {
+  sd_ftp_storage_lock();
+  sd_ftp_storage_unlock();
   g_cfg        = cfg;
   g_configured = true;
   log_info("ftp: configured port %u (will start when WiFi connects)",
@@ -470,31 +625,43 @@ void SD_FTP_Server::poll() {
     } else {
       g_ctrl_client = nc;
       g_ctrl_client.setNoDelay(true);
+      g_client_active = true;
       g_logged_in = false;
-      strncpy(g_cwd, "/", sizeof(g_cwd));
+      copy_string(g_cwd, sizeof(g_cwd), "/");
+      g_rnfr[0] = 0;
+      g_linelen = 0;
+      g_line_overflow = false;
       log_info("ftp: client connected from %s",
                g_ctrl_client.remoteIP().toString().c_str());
       send_reply("220 SD_FTP_Server ready");
     }
   }
 
-  if (!g_ctrl_client || !g_ctrl_client.connected()) {
-    if (g_ctrl_client) { close_client_state(); log_info("ftp: client disconnected"); }
+  if (!g_client_active || !g_ctrl_client.connected()) {
+    if (g_client_active) {
+      close_client_state();
+      log_info("ftp: client disconnected");
+    }
     return;
   }
 
   // Drain pending command lines (one full \r\n-terminated line at a time).
-  static char   linebuf[256];
-  static size_t linelen = 0;
   while (g_ctrl_client.available()) {
     int c = g_ctrl_client.read();
     if (c < 0) break;
     if (c == '\n') {
-      linebuf[linelen] = 0;
-      handle_command_line(linebuf);
-      linelen = 0;
-    } else if (linelen < sizeof(linebuf) - 1) {
-      linebuf[linelen++] = (char)c;
+      if (g_line_overflow) {
+        send_reply("500 Command line too long");
+      } else {
+        g_linebuf[g_linelen] = 0;
+        handle_command_line(g_linebuf);
+      }
+      g_linelen = 0;
+      g_line_overflow = false;
+    } else if (g_linelen < sizeof(g_linebuf) - 1) {
+      g_linebuf[g_linelen++] = (char)c;
+    } else {
+      g_line_overflow = true;
     }
   }
 }
@@ -505,3 +672,17 @@ uint16_t SD_FTP_Server::port()      const { return g_cfg.port; }
 
 // Singleton instance.
 SD_FTP_Server SDFTPServer;
+
+void sd_ftp_storage_lock() {
+  if (!g_storage_mutex) {
+    portENTER_CRITICAL(&g_storage_mutex_init_mux);
+    if (!g_storage_mutex)
+      g_storage_mutex = xSemaphoreCreateRecursiveMutexStatic(&g_storage_mutex_buffer);
+    portEXIT_CRITICAL(&g_storage_mutex_init_mux);
+  }
+  if (g_storage_mutex) xSemaphoreTakeRecursive(g_storage_mutex, portMAX_DELAY);
+}
+
+void sd_ftp_storage_unlock() {
+  if (g_storage_mutex) xSemaphoreGiveRecursive(g_storage_mutex);
+}

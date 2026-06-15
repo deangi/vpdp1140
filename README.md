@@ -152,17 +152,34 @@ v4b_quirks  = true            ; RSTS V4B / RT-11 / V6 / XXDP
 kwp_enabled = false           ; true for RSTS V7 bring-up
 
 [disks]
-; dl0, dl1 = RL01/RL02 packs (RL11 controller)
-; dx0, dx1 = RX02 floppies   (not yet wired)
+; dl0..dl3 = RL01/RL02 packs (RL11 controller)
 ; rk0      = RK05 pack       (RK11 controller)
 ; When boot=rk0 the rk0 image takes slot 0 in place of dl0.
 dl0  = /xxdp25.dsk
 dl1  =
-dx0  =
-dx1  =
+dl2  =
+dl3  =
 rk0  = /unixv6.dsk
-boot = rk0                    ; or dl0, dl1, dx0, dx1
+boot = rk0                    ; or dl0, dl1, dl2, dl3
 ```
+
+### RL and RK disk selection
+
+The emulator can boot from either controller:
+
+- `boot = dl0` through `boot = dl3` selects the RL11 bootstrap and treats
+  the four disk slots as RL drives `DL0` through `DL3`. RL01 images are
+  approximately 5 MB and RL02 images are approximately 10 MB.
+- `boot = rk0` selects the RK11 bootstrap. The `rk0` image is mounted in
+  host slot 0 in place of `dl0`, so the guest sees it as RK drive `RK0`.
+  RK05 images are approximately 2.5 MB; some distributions use paired or
+  combined images of approximately 5 MB.
+
+The current drive menu uses four shared host image slots. It does not assign
+some slots permanently to RL11 and others to RK11, and it does not validate
+an image's controller type. Mount RL images when using an RL boot and use the
+configured `rk0` image when using an RK boot. Simultaneous mixed RL/RK drive
+mapping is not currently supported.
 
 ## Using it
 
@@ -174,7 +191,7 @@ boot = rk0                    ; or dl0, dl1, dx0, dx1
 - The SD card root is available over FTP at `ftp://<board-ip>:21/`
   using the `[ftp]` credentials in `/wificonfig.ini`.
 - **Settings menu:** tap the screen or press the onboard button. From
-  there you can mount/dismount/create disk images, reboot the PDP-11,
+  there you can mount/dismount existing disk images, reboot the PDP-11,
   adjust brightness, and view WiFi / Telnet / FTP status.
 
 ### Booting V6 Unix
@@ -238,7 +255,7 @@ The most material changes are:
 - ✅ **m3** RL11 → XXDP+ boots; 14 sam11 CPU bugs fixed; SPL/MTPS/MFPS added
 - ✅ **m4** V6 Unix boots from RK05 to `#` prompt
 - ⏸ **m5** — m4's V6 boot is what m5 was supposed to add (XXDP); already done in m3
-- ⏳ **m6** Settings-menu retarget — drive labels DL0/DL1/DX0/DX1/RK0 already in place; mount/dismount-at-runtime UI still pending
+- **Settings menu:** mount or dismount existing images on DL0..DL3 and RK0.
 - ⏳ **m7** KW11-L line clock — present, but tickrate could be calibrated
 - ⏳ **m8** Second DL11 tunneling SD file I/O — designed in chat, not yet built
 - ⏳ **m9** RT-11 / RSTS chase — sam11 known-broken; deep-dive if motivated

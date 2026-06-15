@@ -2,6 +2,7 @@
 #include "config.h"
 #include "platform.h"
 #include "secrets.h"
+#include "SD_FTP_Server/src/SD_FTP_Server.h"
 
 #include <SD_MMC.h>
 #include <string.h>    // strrchr, strncmp, strcasecmp for variant discovery
@@ -200,10 +201,10 @@ void config_apply_compiled_defaults(AppConfig& cfg) {
   cfg.v4b_quirks      = true;
   cfg.kwp_enabled     = false;
 
-  cfg.disk_a        = DEFAULT_A_IMG;
-  cfg.disk_b        = "";
-  cfg.disk_c        = DEFAULT_C_IMG;
-  cfg.disk_d        = "";
+  cfg.disk_a        = DEFAULT_DL0_IMG;
+  cfg.disk_b        = DEFAULT_DL1_IMG;
+  cfg.disk_c        = DEFAULT_DL2_IMG;
+  cfg.disk_d        = DEFAULT_DL3_IMG;
   cfg.disk_rk0      = "";
   cfg.boot_drive    = 'a';
   cfg.boot_kind     = AppConfig::BK_RL;
@@ -211,7 +212,10 @@ void config_apply_compiled_defaults(AppConfig& cfg) {
 
 // -------- parser --------
 
-static void parse_line(AppConfig& cfg, String& section, const String& raw) {
+enum ConfigDomain : uint8_t { CONFIG_NETWORK, CONFIG_EMULATOR };
+
+static void parse_line(AppConfig& cfg, String& section, const String& raw,
+                       ConfigDomain domain) {
   String t = trim(raw);
   if (t.length() == 0) return;
   if (t.startsWith(";") || t.startsWith("#")) return;
@@ -225,10 +229,11 @@ static void parse_line(AppConfig& cfg, String& section, const String& raw) {
   String key = to_lower(trim(t.substring(0, eq)));
   String val = strip_inline_comment(t.substring(eq + 1));
 
+  bool network_section = section == "wifi" || section == "telnet" || section == "ftp";
+  if ((domain == CONFIG_NETWORK) != network_section) return;
+
   if (section == "system") {
-    if      (key == "title")    cfg.title   = val;
-    else if (key == "version")  cfg.version = val;
-    else if (key == "build")    cfg.build   = val;
+    if (key == "title") cfg.title = val;
   } else if (section == "wifi") {
     if      (key == "ssid")     cfg.wifi_ssid     = val;
     else if (key == "password") cfg.wifi_password = val;
@@ -259,23 +264,23 @@ static void parse_line(AppConfig& cfg, String& section, const String& raw) {
                                                      val.equalsIgnoreCase("yes") ||
                                                      val.equalsIgnoreCase("on"));
   } else if (section == "disks") {
-    // Drive slot 0..3 maps to PDP-11 unit names dl0/dl1 (RL02) and
-    // dx0/dx1 (RX02). Internally we still index by char 'a'..'d' to
-    // keep the slot-array indexing in vpdp1140.ino simple. rk0 is a
+    // Drive slot 0..3 maps to RL11 unit names dl0..dl3. Internally we
+    // still index by char 'a'..'d' to keep the slot-array indexing in
+    // vpdp1140.ino simple. dx0/dx1 remain accepted as legacy aliases. rk0 is a
     // separate logical key that, when boot=rk0, gets mounted at slot 0
     // in place of dl0 so the RK11 controller can find it.
     if      (key == "dl0")      cfg.disk_a = val;
     else if (key == "dl1")      cfg.disk_b = val;
-    else if (key == "dx0")      cfg.disk_c = val;
-    else if (key == "dx1")      cfg.disk_d = val;
+    else if (key == "dl2" || key == "dx0") cfg.disk_c = val;
+    else if (key == "dl3" || key == "dx1") cfg.disk_d = val;
     else if (key == "rk0")      cfg.disk_rk0 = val;
     else if (key == "boot") {
       String v = to_lower(val);
       cfg.boot_kind = AppConfig::BK_RL;
       if      (v == "dl0" || v == "0")  cfg.boot_drive = 'a';
       else if (v == "dl1" || v == "1")  cfg.boot_drive = 'b';
-      else if (v == "dx0" || v == "2")  cfg.boot_drive = 'c';
-      else if (v == "dx1" || v == "3")  cfg.boot_drive = 'd';
+      else if (v == "dl2" || v == "dx0" || v == "2") cfg.boot_drive = 'c';
+      else if (v == "dl3" || v == "dx1" || v == "3") cfg.boot_drive = 'd';
       // rk0 (DEC) / dk0 (Bell Labs Unix V6 device name) both mean the RK05.
       else if (v == "rk0" || v == "dk0") {
         cfg.boot_drive = 'a';
@@ -293,13 +298,27 @@ static void parse_line(AppConfig& cfg, String& section, const String& raw) {
 
 // Internal: parse one config file at `path` into cfg through `parse_line`.
 // Returns true if the file was opened and parsed; false if it didn't exist.
-static bool parse_config_file(AppConfig& cfg, const char* path) {
+static void recover_config_backup(const char* path) {
+  if (SD_MMC.exists(path)) return;
+  char backup[192];
+  if (snprintf(backup, sizeof(backup), "%s.bak", path) >= (int)sizeof(backup)) return;
+  if (SD_MMC.exists(backup)) {
+    if (SD_MMC.rename(backup, path))
+      LOG("Restored interrupted config update: %s", path);
+    else
+      LOGE("Could not restore config backup %s", backup);
+  }
+}
+
+static bool parse_config_file(AppConfig& cfg, const char* path, ConfigDomain domain) {
+  SD_FTP_StorageGuard guard;
+  recover_config_backup(path);
   File f = SD_MMC.open(path, FILE_READ);
   if (!f) return false;
   String section;
   while (f.available()) {
     String line = f.readStringUntil('\n');
-    parse_line(cfg, section, line);
+    parse_line(cfg, section, line, domain);
   }
   f.close();
   return true;
@@ -314,7 +333,7 @@ bool config_load_wifi(AppConfig& cfg) {
   cfg.wifi_password = "";
   cfg.wifi_hostname = "";
 
-  bool existed = parse_config_file(cfg, WIFI_CFG_PATH);
+  bool existed = parse_config_file(cfg, WIFI_CFG_PATH, CONFIG_NETWORK);
   if (!existed) {
     LOG("%s not found, writing defaults", WIFI_CFG_PATH);
     // Restore compiled defaults so the writer emits a useful template.
@@ -343,11 +362,13 @@ bool config_load_pdp(AppConfig& cfg) {
   cfg.disk_rk0 = "";
   cfg.boot_input_len = 0;
 
-  bool existed = parse_config_file(cfg, PDP_CFG_PATH);
+  bool existed = parse_config_file(cfg, PDP_CFG_PATH, CONFIG_EMULATOR);
   if (!existed) {
     LOG("%s not found, writing defaults", PDP_CFG_PATH);
-    cfg.disk_a = DEFAULT_A_IMG;
-    cfg.disk_c = DEFAULT_C_IMG;
+    cfg.disk_a = DEFAULT_DL0_IMG;
+    cfg.disk_b = DEFAULT_DL1_IMG;
+    cfg.disk_c = DEFAULT_DL2_IMG;
+    cfg.disk_d = DEFAULT_DL3_IMG;
     config_write_default_pdp(cfg);
     return false;
   }
@@ -355,6 +376,7 @@ bool config_load_pdp(AppConfig& cfg) {
 }
 
 bool config_write_default_wifi(const AppConfig& cfg) {
+  SD_FTP_StorageGuard guard;
   // SD_MMC's FILE_WRITE truncates, which is what we want for a clean rewrite.
   File f = SD_MMC.open(WIFI_CFG_PATH, FILE_WRITE);
   if (!f) {
@@ -371,6 +393,10 @@ bool config_write_default_wifi(const AppConfig& cfg) {
   f.println("password = ");
   f.printf("hostname = %s\r\n", cfg.wifi_hostname.c_str());
   f.println();
+  f.println("[telnet]");
+  f.printf("enabled = %s\r\n", cfg.telnet_enabled ? "true" : "false");
+  f.printf("port    = %d\r\n", cfg.telnet_port);
+  f.println();
   f.println("[ftp]");
   f.println("; FTP exposes the SD card root. Passive data uses port+1.");
   f.printf("enabled  = %s\r\n", cfg.ftp_enabled ? "true" : "false");
@@ -383,6 +409,7 @@ bool config_write_default_wifi(const AppConfig& cfg) {
 }
 
 bool config_write_default_pdp(const AppConfig& cfg) {
+  SD_FTP_StorageGuard guard;
   File f = SD_MMC.open(PDP_CFG_PATH, FILE_WRITE);
   if (!f) {
     LOGE("Could not open %s for write", PDP_CFG_PATH);
@@ -394,12 +421,6 @@ bool config_write_default_pdp(const AppConfig& cfg) {
   f.println();
   f.println("[system]");
   f.printf("title   = %s\r\n", cfg.title.c_str());
-  f.printf("version = %s\r\n", cfg.version.c_str());
-  f.printf("build   = %s\r\n", cfg.build.c_str());
-  f.println();
-  f.println("[telnet]");
-  f.printf("enabled = %s\r\n", cfg.telnet_enabled ? "true" : "false");
-  f.printf("port    = %d\r\n", cfg.telnet_port);
   f.println();
   f.println("[console]");
   f.println("; boot_input is injected into the KL11 input queue after each");
@@ -436,24 +457,23 @@ bool config_write_default_pdp(const AppConfig& cfg) {
   f.printf("kwp_enabled = %s\r\n", cfg.kwp_enabled ? "true" : "false");
   f.println();
   f.println("[disks]");
-  f.println("; dl0, dl1 = RL02 10 MB removable disk packs.");
-  f.println("; dx0, dx1 = RX02 512 KB double-density floppies.");
+  f.println("; dl0..dl3 = RL11 units (RL01/RL02 disk packs).");
   f.println("; rk0      = RK05 2.5 MB disk pack (e.g. RT-11).");
   f.println("; When boot=rk0 (or dk0, the Unix V6 name) the rk0 image takes");
   f.println("; slot 0 in place of dl0 so the RK11 controller sees it as drive 0.");
   f.println("; Leave a slot blank to dismount it at boot.");
   f.printf("dl0  = %s\r\n", cfg.disk_a.c_str());
   f.printf("dl1  = %s\r\n", cfg.disk_b.c_str());
-  f.printf("dx0  = %s\r\n", cfg.disk_c.c_str());
-  f.printf("dx1  = %s\r\n", cfg.disk_d.c_str());
+  f.printf("dl2  = %s\r\n", cfg.disk_c.c_str());
+  f.printf("dl3  = %s\r\n", cfg.disk_d.c_str());
   f.printf("rk0  = %s\r\n", cfg.disk_rk0.c_str());
-  // Friendly boot value: dl0/dl1/dx0/dx1/rk0
+  // Friendly boot value: dl0/dl1/dl2/dl3/rk0
   const char* boot_name;
   if (cfg.boot_kind == AppConfig::BK_RK) boot_name = "rk0";
   else boot_name = (cfg.boot_drive == 'a') ? "dl0"
                  : (cfg.boot_drive == 'b') ? "dl1"
-                 : (cfg.boot_drive == 'c') ? "dx0"
-                 : (cfg.boot_drive == 'd') ? "dx1" : "dl0";
+                 : (cfg.boot_drive == 'c') ? "dl2"
+                 : (cfg.boot_drive == 'd') ? "dl3" : "dl0";
   f.printf("boot = %s\r\n", boot_name);
   f.close();
   LOG("Wrote default %s", PDP_CFG_PATH);
@@ -461,62 +481,78 @@ bool config_write_default_pdp(const AppConfig& cfg) {
 }
 
 bool config_copy_file(const char* src, const char* dst) {
+  SD_FTP_StorageGuard guard;
+  char temp[192];
+  char backup[192];
+  if (snprintf(temp, sizeof(temp), "%s.tmp", dst) >= (int)sizeof(temp) ||
+      snprintf(backup, sizeof(backup), "%s.bak", dst) >= (int)sizeof(backup)) {
+    LOGE("config_copy_file: destination path too long: %s", dst);
+    return false;
+  }
+
   File s = SD_MMC.open(src, FILE_READ);
   if (!s) { LOGE("config_copy_file: can't open %s for read", src); return false; }
   uint32_t srcSize = (uint32_t)s.size();
 
-  // Defensively remove the destination before opening for write. Some
-  // Arduino-ESP32 SD_MMC builds don't truncate on FILE_WRITE when the
-  // file already exists, leaving stale trailing bytes from a longer
-  // previous version - and those stale bytes would then be parsed at
-  // the next boot, silently keeping old settings around.
-  if (SD_MMC.exists(dst)) {
-    bool removed = SD_MMC.remove(dst);
-    LOG("config_copy_file: removed pre-existing %s (%s)",
-        dst, removed ? "ok" : "FAILED");
-    if (!removed) { s.close(); return false; }
-  }
-
-  File d = SD_MMC.open(dst, FILE_WRITE);
+  if (SD_MMC.exists(temp)) SD_MMC.remove(temp);
+  File d = SD_MMC.open(temp, FILE_WRITE);
   if (!d) {
-    LOGE("config_copy_file: can't open %s for write", dst);
+    LOGE("config_copy_file: can't open %s for write", temp);
     s.close();
     return false;
   }
 
   uint8_t buf[512];
   size_t total = 0;
+  bool copy_ok = true;
   while (s.available()) {
     int n = s.read(buf, sizeof(buf));
-    if (n <= 0) break;
+    if (n <= 0) { copy_ok = false; break; }
     int w = d.write(buf, n);
     if (w != n) {
       LOGE("config_copy_file: short write (%d/%d) at %u into %s",
-           w, n, (unsigned)total, dst);
-      s.close(); d.close();
-      return false;
+           w, n, (unsigned)total, temp);
+      copy_ok = false;
+      break;
     }
     total += n;
   }
   s.close();
+  d.flush();
   d.close();
 
-  // Verify by reopening - tells us whether the bytes actually landed
-  // on the SD card and matches what we expect from the source.
-  File v = SD_MMC.open(dst, FILE_READ);
+  File v = SD_MMC.open(temp, FILE_READ);
   uint32_t verifySize = v ? (uint32_t)v.size() : 0;
   if (v) v.close();
-  LOG("config_copy_file: %s -> %s  src=%u  written=%u  on-disk=%u",
-      src, dst, (unsigned)srcSize, (unsigned)total, (unsigned)verifySize);
-  if (verifySize != srcSize) {
-    LOGE("config_copy_file: size mismatch (src %u vs on-disk %u) - copy likely failed",
-         (unsigned)srcSize, (unsigned)verifySize);
+  if (!copy_ok || total != srcSize || verifySize != srcSize) {
+    LOGE("config_copy_file: temporary copy failed src=%u written=%u on-disk=%u",
+         (unsigned)srcSize, (unsigned)total, (unsigned)verifySize);
+    SD_MMC.remove(temp);
     return false;
   }
+
+  if (SD_MMC.exists(backup)) SD_MMC.remove(backup);
+  bool had_dst = SD_MMC.exists(dst);
+  if (had_dst && !SD_MMC.rename(dst, backup)) {
+    LOGE("config_copy_file: can't preserve %s as %s", dst, backup);
+    SD_MMC.remove(temp);
+    return false;
+  }
+  if (!SD_MMC.rename(temp, dst)) {
+    LOGE("config_copy_file: can't activate %s", dst);
+    if (had_dst && !SD_MMC.rename(backup, dst))
+      LOGE("config_copy_file: FAILED to restore %s from %s", dst, backup);
+    SD_MMC.remove(temp);
+    return false;
+  }
+  if (had_dst) SD_MMC.remove(backup);
+  LOG("config_copy_file: atomically replaced %s from %s (%u bytes)",
+      dst, src, (unsigned)srcSize);
   return true;
 }
 
 int config_list_variants(const char* prefix, char names[][44], int max) {
+  SD_FTP_StorageGuard guard;
   // Scan SD root for files matching "<prefix>NAME.ini" (case-insensitive
   // on the ".ini" suffix; the prefix is matched as written). Stores the
   // middle NAME portion in names[i]. Skips a file that's exactly the
@@ -555,63 +591,6 @@ int config_list_variants(const char* prefix, char names[][44], int max) {
   return count;
 }
 
-// -------- disk image creation --------
-
-bool ensure_disk_image(const char* path, uint32_t bytes,
-                       bool create_if_missing, const char* label) {
-  if (!path || !*path) return false;
-  if (SD_MMC.exists(path)) {
-    File f = SD_MMC.open(path, FILE_READ);
-    if (!f) {
-      LOGE("[%s] exists but cannot open %s", label, path);
-      return false;
-    }
-    uint32_t sz = (uint32_t)f.size();
-    f.close();
-    if (sz == bytes) {
-      LOG("[%s] %s OK (%u bytes)", label, path, (unsigned)sz);
-      return true;
-    }
-    LOGE("[%s] %s wrong size: %u (expected %u) - leaving file alone",
-         label, path, (unsigned)sz, (unsigned)bytes);
-    return false;
-  }
-  if (!create_if_missing) {
-    LOG("[%s] %s missing (not auto-created)", label, path);
-    return false;
-  }
-  LOG("[%s] creating zeroed %s (%u bytes) - this can take a while ...",
-      label, path, (unsigned)bytes);
-  File f = SD_MMC.open(path, FILE_WRITE);
-  if (!f) {
-    LOGE("[%s] could not create %s", label, path);
-    return false;
-  }
-  static uint8_t buf[4096] = {0};
-  uint32_t remaining = bytes;
-  uint32_t t0 = millis();
-  uint32_t lastReport = t0;
-  while (remaining) {
-    size_t n = remaining > sizeof(buf) ? sizeof(buf) : remaining;
-    size_t w = f.write(buf, n);
-    if (w != n) {
-      LOGE("[%s] write failed at offset %u", label, (unsigned)(bytes - remaining));
-      f.close();
-      return false;
-    }
-    remaining -= n;
-    if (millis() - lastReport >= 2000) {
-      uint32_t done = bytes - remaining;
-      LOG("[%s]  ... %u / %u bytes (%u%%)",
-          label, (unsigned)done, (unsigned)bytes, (unsigned)(done * 100ULL / bytes));
-      lastReport = millis();
-    }
-  }
-  f.close();
-  LOG("[%s] created %s in %u ms", label, path, (unsigned)(millis() - t0));
-  return true;
-}
-
 // -------- printer --------
 
 void config_print(const AppConfig& cfg) {
@@ -639,11 +618,11 @@ void config_print(const AppConfig& cfg) {
   if (cfg.boot_kind == AppConfig::BK_RK) boot_name = "rk0";
   else boot_name = (cfg.boot_drive == 'a') ? "dl0"
                  : (cfg.boot_drive == 'b') ? "dl1"
-                 : (cfg.boot_drive == 'c') ? "dx0"
-                 : (cfg.boot_drive == 'd') ? "dx1" : "?";
+                 : (cfg.boot_drive == 'c') ? "dl2"
+                 : (cfg.boot_drive == 'd') ? "dl3" : "?";
   LOG("[disks]   dl0=\"%s\"  dl1=\"%s\"",
       cfg.disk_a.c_str(), cfg.disk_b.c_str());
-  LOG("          dx0=\"%s\"  dx1=\"%s\"",
+  LOG("          dl2=\"%s\"  dl3=\"%s\"",
       cfg.disk_c.c_str(), cfg.disk_d.c_str());
   LOG("          rk0=\"%s\"  boot=%s",
       cfg.disk_rk0.c_str(), boot_name);

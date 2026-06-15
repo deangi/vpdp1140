@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "SD_FTP_Server/src/SD_FTP_Server.h"
 #include "config.h"
 #include "platform.h"
 #include "disk.h"
@@ -87,6 +88,7 @@ bool ui_consume_esp_restart() { bool r = g_esp_restart; g_esp_restart = false; r
 
 // ---- scan SD root for mountable images ----
 static void scan_files() {
+  SD_FTP_StorageGuard guard;
   g_file_count = 0;
   fs::File root = SD_MMC.open("/");
   if (!root) return;
@@ -109,18 +111,6 @@ static void scan_files() {
   root.close();
 }
 
-// Create a new blank image with a generated name; writes the path to `out`.
-static void create_image(bool is_hdd, char* out, size_t outsz) {
-  for (int i = 0; i < 100; i++) {
-    snprintf(out, outsz, "/%s%d.%s",
-             is_hdd ? "HDDISK" : "FLOPPY", i, is_hdd ? "hdd" : "dsk");
-    if (!SD_MMC.exists(out)) break;
-  }
-  LOG("ui: creating %s", out);
-  if (is_hdd) ensure_disk_image(out, HD_BYTES, true, "NEW");  // zeroed; FDISK it
-  else        disk_create_floppy(out);                        // pre-formatted
-}
-
 // ---- build the item list / title for the current screen ----
 static void rebuild() {
   g_count = 0;
@@ -138,7 +128,7 @@ static void rebuild() {
     case SC_DRIVES:
       strcpy(g_title, "Drives");
       {
-        static const char* const ui_unit_names[4] = { "DL0", "DL1", "DX0", "DX1" };
+        static const char* const ui_unit_names[4] = { "DL0", "DL1", "DL2", "DL3" };
         for (int s = 0; s < 4; s++) {
           if (disk_is_mounted(s))
             snprintf(g_items[g_count++], 44, "%s %s%s", ui_unit_names[s],
@@ -150,7 +140,7 @@ static void rebuild() {
       }
       break;
     case SC_DRIVE: {
-      static const char* const drv_unit_names[4] = { "DL0", "DL1", "DX0", "DX1" };
+      static const char* const drv_unit_names[4] = { "DL0", "DL1", "DL2", "DL3" };
       snprintf(g_title, sizeof(g_title), "Drive %s", drv_unit_names[g_sel]);
       strcpy(g_items[g_count++],
              disk_is_mounted(g_sel) ? "Change Image" : "Mount Image");
@@ -159,14 +149,12 @@ static void rebuild() {
       break;
     }
     case SC_PICKER: {
-      static const char* const pick_unit_names[4] = { "DL0", "DL1", "DX0", "DX1" };
+      static const char* const pick_unit_names[4] = { "DL0", "DL1", "DL2", "DL3" };
       snprintf(g_title, sizeof(g_title), "Mount into %s", pick_unit_names[g_sel]);
-      // Item 0 always offers creating a new blank image of the right type.
-      strcpy(g_items[g_count++],
-             (g_sel >= DRIVE_C) ? "[+] Create New 32MB HDD"
-                                : "[+] Create New Floppy");
       for (int i = 0; i < g_file_count; i++)
         strncpy(g_items[g_count++], g_files[i], 43);
+      if (g_count == 0)
+        strcpy(g_items[g_count++], "(no disk images)");
       break;
     }
     case SC_BRIGHT:
@@ -278,17 +266,11 @@ static void activate(int idx) {        // idx = absolute item index
       else          { disk_dismount(g_sel); go(SC_DRIVES); }
       break;
     case SC_PICKER: {
+      if (g_file_count == 0 || idx >= g_file_count) break;
       char path[48];
-      bool ok;
-      if (idx == 0) {                    // create a new image, then mount it
-        create_image(g_sel >= DRIVE_C, path, sizeof(path));
-        ok = disk_mount(g_sel, path);
-        LOG("ui: created+mounted %c: %s -> %s", 'A' + g_sel, path, ok ? "ok" : "FAIL");
-      } else {                           // mount an existing image
-        snprintf(path, sizeof(path), "/%s", g_files[idx - 1]);
-        ok = disk_mount(g_sel, path);
-        LOG("ui: mount %c: %s -> %s", 'A' + g_sel, path, ok ? "ok" : "FAIL");
-      }
+      snprintf(path, sizeof(path), "/%s", g_files[idx]);
+      bool ok = disk_mount(g_sel, path);
+      LOG("ui: mount %c: %s -> %s", 'A' + g_sel, path, ok ? "ok" : "FAIL");
       go(SC_DRIVES);
       break;
     }

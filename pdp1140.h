@@ -158,7 +158,7 @@ namespace pdp11 {
 #define USE_LP true   // enable the line printer
 #define USE_PC true   // WIP - enable the punch card/tape read/write
 #define USE_RP false  // WIP - enable RH11 and RP11 disk drives (e.g. RP06)
-#define USE_RL false  // WIP - enable RL11 disk drives (e.g. RL02)
+#define USE_RL true   // RL11 is integrated into DD11 and reset with the CPU
 #define USE_TM false  // WIP - enable TM11 mag tape drives (e.g. TU10)
 
 struct intr {

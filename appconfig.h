@@ -77,8 +77,7 @@ struct AppConfig {
   bool   kwp_enabled = false;
 
   // [disks]
-  // slot 0..3 holds whatever the host has mounted at DL0/DL1/DX0/DX1 -
-  // RL controller sees them as RL02/RX02 packs.
+  // Slot 0..3 holds host media mounted at RL11 units DL0..DL3.
   String disk_a;
   String disk_b;
   String disk_c;
@@ -119,11 +118,6 @@ bool config_copy_file(const char* src, const char* dst);
 // middle portion (between prefix and ".ini") in names[i]. Returns the
 // count actually stored (capped at max). Skips the active file itself.
 int  config_list_variants(const char* prefix, char names[][44], int max);
-
-// Disk image management
-bool ensure_disk_image(const char* path, uint32_t bytes,
-                       bool create_if_missing,
-                       const char* label);                   // returns true if usable image present
 
 // Logging helper
 void config_print(const AppConfig& cfg);

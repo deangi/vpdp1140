@@ -1,13 +1,13 @@
 #include "disk.h"
 #include "config.h"
 #include "platform.h"
+#include "SD_FTP_Server/src/SD_FTP_Server.h"
 #include <Arduino.h>
 #include <SD_MMC.h>
 
 struct DriveSlot {
   File     file;
   bool     mounted  = false;
-  bool     is_hdd   = false;
   bool     changed  = false;       // media-change flag (set on mount)
   bool     readonly = false;       // image could only be opened read-only
   char     path[64] = {0};
@@ -21,6 +21,7 @@ static DriveSlot g_drv[DRIVE_COUNT];
 static bool slot_valid(int s) { return s >= 0 && s < DRIVE_COUNT; }
 
 bool disk_mount(int slot, const char* path) {
+  SD_FTP_StorageGuard guard;
   if (!slot_valid(slot) || !path || !*path) return false;
 
   disk_dismount(slot);   // ensure clean slot
@@ -51,12 +52,9 @@ bool disk_mount(int slot, const char* path) {
     f.close();
     return false;
   }
-  bool is_hdd = (slot == DRIVE_C || slot == DRIVE_D);
-
   g_drv[slot].file     = f;
   g_drv[slot].mounted  = true;
-  g_drv[slot].is_hdd   = is_hdd;
-  g_drv[slot].changed  = true;        // signal DOS the media changed
+  g_drv[slot].changed  = true;
   g_drv[slot].readonly = readonly;
   g_drv[slot].size     = sz;
   g_drv[slot].reads    = 0;
@@ -70,6 +68,7 @@ bool disk_mount(int slot, const char* path) {
 }
 
 void disk_dismount(int slot) {
+  SD_FTP_StorageGuard guard;
   if (!slot_valid(slot)) return;
   if (g_drv[slot].mounted) {
     g_drv[slot].file.close();
@@ -97,9 +96,10 @@ uint32_t disk_size_bytes(int slot) {
 }
 
 int disk_read(int slot, uint32_t byte_offset, void* buf, uint32_t bytes) {
+  SD_FTP_StorageGuard guard;
   if (!disk_is_mounted(slot)) return -1;
   DriveSlot& d = g_drv[slot];
-  if (byte_offset + bytes > d.size) {
+  if (byte_offset > d.size || bytes > d.size - byte_offset) {
     LOGE("disk_read[%c]: out of range off=%u len=%u size=%u",
          'A' + slot, (unsigned)byte_offset, (unsigned)bytes, (unsigned)d.size);
     return -1;
@@ -119,10 +119,11 @@ int disk_read(int slot, uint32_t byte_offset, void* buf, uint32_t bytes) {
 }
 
 int disk_write(int slot, uint32_t byte_offset, const void* buf, uint32_t bytes) {
+  SD_FTP_StorageGuard guard;
   if (!disk_is_mounted(slot)) return -1;
   DriveSlot& d = g_drv[slot];
-  if (d.readonly) return -1;          // write-protected image -> INT 13h reports 0x03
-  if (byte_offset + bytes > d.size) {
+  if (d.readonly) return -1;
+  if (byte_offset > d.size || bytes > d.size - byte_offset) {
     LOGE("disk_write[%c]: out of range off=%u len=%u size=%u",
          'A' + slot, (unsigned)byte_offset, (unsigned)bytes, (unsigned)d.size);
     return -1;
@@ -152,53 +153,4 @@ bool disk_take_change(int slot) {
   bool c = g_drv[slot].changed;
   g_drv[slot].changed = false;
   return c;
-}
-
-bool disk_create_floppy(const char* path) {
-  File f = SD_MMC.open(path, FILE_WRITE);     // create / truncate
-  if (!f) {
-    LOGE("disk_create_floppy: cannot create %s", path);
-    return false;
-  }
-  uint8_t sec[512];
-
-  // ---- sector 0: boot sector with a valid 1.44 MB FAT12 BPB ----
-  memset(sec, 0, sizeof(sec));
-  sec[0] = 0xEB; sec[1] = 0x3C; sec[2] = 0x90;     // JMP over the BPB
-  memcpy(sec + 3, "v8088   ", 8);                  // OEM name
-  sec[11] = 0x00; sec[12] = 0x02;                  // 512 bytes/sector
-  sec[13] = 1;                                     // 1 sector/cluster
-  sec[14] = 1; sec[15] = 0;                        // 1 reserved sector
-  sec[16] = 2;                                     // 2 FATs
-  sec[17] = 0xE0; sec[18] = 0x00;                  // 224 root entries
-  sec[19] = 0x40; sec[20] = 0x0B;                  // 2880 total sectors
-  sec[21] = 0xF0;                                  // media descriptor
-  sec[22] = 9; sec[23] = 0;                        // 9 sectors/FAT
-  sec[24] = 18; sec[25] = 0;                       // 18 sectors/track
-  sec[26] = 2; sec[27] = 0;                        // 2 heads
-  sec[36] = 0x00;                                  // BIOS drive number
-  sec[38] = 0x29;                                  // extended boot signature
-  uint32_t serial = (uint32_t)millis();
-  memcpy(sec + 39, &serial, 4);                    // volume serial number
-  memcpy(sec + 43, "NO NAME    ", 11);             // volume label
-  memcpy(sec + 54, "FAT12   ", 8);                 // filesystem type
-  sec[510] = 0x55; sec[511] = 0xAA;                // boot signature
-  f.write(sec, 512);
-
-  // ---- two FATs, 9 sectors each; first 3 bytes = F0 FF FF ----
-  for (int fat = 0; fat < 2; fat++) {
-    memset(sec, 0, sizeof(sec));
-    sec[0] = 0xF0; sec[1] = 0xFF; sec[2] = 0xFF;
-    f.write(sec, 512);
-    memset(sec, 0, sizeof(sec));
-    for (int i = 1; i < 9; i++) f.write(sec, 512);
-  }
-
-  // ---- root directory + data area: zeros (sectors 19..2879) ----
-  memset(sec, 0, sizeof(sec));
-  for (int i = 19; i < 2880; i++) f.write(sec, 512);
-
-  f.close();
-  LOG("disk_create_floppy: formatted %s (1.44 MB FAT12)", path);
-  return true;
 }

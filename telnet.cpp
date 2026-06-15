@@ -28,16 +28,30 @@ static bool        g_started = false;
 static uint16_t    g_port = 23;
 static char        g_client_ip[20] = {0};
 
-// 8 KB output FIFO (KL11 push, telnet_poll drain) and 8 KB input FIFO
-// (drain_rx push, kl11::poll pop). Both storages live in PSRAM via
-// EXT_RAM_BSS_ATTR. SPSC on core 1 - producer and consumer for each
-// FIFO both run inside loop(), so plain volatile head/tail is enough.
+// 8 KB output FIFO (KL11/core 1 push, telnet task/core 0 drain) and 8 KB
+// input FIFO (telnet task/core 0 push, KL11/core 1 pop). Both storages live
+// in PSRAM via EXT_RAM_BSS_ATTR and each ring has one producer and consumer.
 #define VPDP_TELNET_FIFO_BYTES 8192   // must be power of two
 EXT_RAM_BSS_ATTR static uint8_t telnet_out_storage[VPDP_TELNET_FIFO_BYTES];
 EXT_RAM_BSS_ATTR static uint8_t telnet_in_storage[VPDP_TELNET_FIFO_BYTES];
 static Fifo g_telnet_out;
 static Fifo g_telnet_in;
 static bool g_fifos_inited = false;
+
+enum TelnetRxState : uint8_t {
+  RX_DATA,
+  RX_IAC,
+  RX_IAC_OPTION,
+  RX_SUBNEG,
+  RX_SUBNEG_IAC
+};
+static TelnetRxState g_rx_state = RX_DATA;
+static bool g_rx_after_cr = false;
+
+static void reset_rx_parser() {
+  g_rx_state = RX_DATA;
+  g_rx_after_cr = false;
+}
 
 static void ensure_fifos_inited() {
   if (g_fifos_inited) return;
@@ -64,6 +78,7 @@ static void send_iac(uint8_t verb, uint8_t opt) {
 }
 
 static void on_connect() {
+  reset_rx_parser();
   IPAddress ip = g_client.remoteIP();
   strncpy(g_client_ip, ip.toString().c_str(), sizeof(g_client_ip) - 1);
   g_client_ip[sizeof(g_client_ip) - 1] = 0;
@@ -82,24 +97,49 @@ static void drain_rx() {
     if (ch < 0) break;
     uint8_t c = (uint8_t)ch;
 
-    if (c == T_IAC) {                       // skip telnet command
-      int verb = g_client.read();
-      if (verb == T_SB) {                   // sub-negotiation: read to IAC SE
-        int prev = -1, b;
-        while ((b = g_client.read()) >= 0) {
-          if (prev == T_IAC && b == T_SE) break;
-          prev = b;
+    switch (g_rx_state) {
+      case RX_DATA:
+        if (c == T_IAC) {
+          g_rx_state = RX_IAC;
+          break;
         }
-      } else if (verb == T_WILL || verb == T_WONT ||
-                 verb == T_DO   || verb == T_DONT) {
-        g_client.read();                    // consume the option byte
+        if (g_rx_after_cr && (c == 0x00 || c == 0x0A)) {
+          g_rx_after_cr = false;
+          break;
+        }
+        g_rx_after_cr = false;
+        g_telnet_in.push(c);
+        if (c == 0x0D) g_rx_after_cr = true;
+        break;
+
+      case RX_IAC:
+        if (c == T_IAC) {
+          g_telnet_in.push(T_IAC);
+          g_rx_state = RX_DATA;
+        } else if (c == T_SB) {
+          g_rx_state = RX_SUBNEG;
+        } else if (c == T_WILL || c == T_WONT ||
+                   c == T_DO   || c == T_DONT) {
+          g_rx_state = RX_IAC_OPTION;
+        } else {
+          g_rx_state = RX_DATA;
+        }
+        break;
+
+      case RX_IAC_OPTION:
+        g_rx_state = RX_DATA;
+        break;
+
+      case RX_SUBNEG:
+        if (c == T_IAC) g_rx_state = RX_SUBNEG_IAC;
+        break;
+
+      case RX_SUBNEG_IAC:
+        if (c == T_SE) g_rx_state = RX_DATA;
+        else           g_rx_state = RX_SUBNEG;
+        break;
       }
-      continue;
     }
-    if (c == 0x00) continue;                // telnet CR NUL -> drop NUL
-    if (c == 0x0A) continue;                // CR LF -> drop LF (CR kept)
-    g_telnet_in.push(c);                    // drop-newest if 8 KB full
-  }
 }
 
 bool telnet_in_pop(uint8_t* out) {
@@ -139,6 +179,7 @@ void telnet_poll() {
     }
   } else if (g_client) {                    // client went away
     g_client.stop();
+    reset_rx_parser();
     g_client_ip[0] = 0;
     g_telnet_out.clear();
     LOG("telnet: client disconnected");

@@ -18,8 +18,10 @@ bool touch_poll(int* x, int* y) {
 
   if (down && !was_down) {
     // Landscape (rotation 1) mapping - same as the Freenove touch tutorial.
+    // This FT6336U reports Y about 22 px below the visible pixel position on
+    // this display, so compensate here before UI hit testing.
     int sx = tp.tp[0].y;
-    int sy = 240 - tp.tp[0].x;
+    int sy = 240 - tp.tp[0].x - 22;
     if (sx < 0) sx = 0; else if (sx > 319) sx = 319;
     if (sy < 0) sy = 0; else if (sy > 239) sy = 239;
     if (x) *x = sx;

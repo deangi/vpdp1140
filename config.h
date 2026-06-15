@@ -2,8 +2,8 @@
 
 // ---- App metadata ----
 #define APP_TITLE       "vpdp1140"
-#define APP_VERSION     "V1.1"
-#define APP_BUILD_DATE  "2026-06-09"
+#define APP_VERSION     "V1.2"
+#define APP_BUILD_DATE  "2026-06-14"
 
 // ---- RGB LED (WS2812) ----
 #define LED_PIN         42
@@ -48,11 +48,8 @@
 
 #define DEFAULT_DL0_IMG "/rt11sj.dsk"      // RT-11 SJ V5.x on RL02 (10 MB)
 #define DEFAULT_DL1_IMG ""                  // DL1 dismounted by default
-
-// (Legacy names so existing call sites in the m0 codebase still build until
-// task #6's appconfig rework lands; they map to the corresponding RL02 slot.)
-#define DEFAULT_A_IMG   DEFAULT_DL0_IMG
-#define DEFAULT_C_IMG   DEFAULT_DL0_IMG
+#define DEFAULT_DL2_IMG ""                  // DL2 dismounted by default
+#define DEFAULT_DL3_IMG ""                  // DL3 dismounted by default
 
 // ---- Network ----
 #define TELNET_PORT     23
@@ -68,17 +65,6 @@
 #define RL02_SEC        40
 #define RL02_WORDS_PER_SEC 256
 #define RL02_BYTES_PER_SEC (RL02_WORDS_PER_SEC * 2)   // 512 bytes/sector
-
-// Legacy FD_/HD_ aliases (kept until m6 retires v8088's drive vocabulary
-// from disk.cpp / appconfig.cpp / .ino). They both map to RL02 geometry now.
-#define FD_BYTES        RL02_BYTES
-#define FD_CYL          RL02_CYL
-#define FD_HEADS        RL02_HEADS
-#define FD_SEC          RL02_SEC
-#define HD_BYTES        RL02_BYTES
-#define HD_CYL          RL02_CYL
-#define HD_HEADS        RL02_HEADS
-#define HD_SEC          RL02_SEC
 
 // ---- Boot tuning ----
 #define WIFI_CONNECT_TIMEOUT_MS  20000

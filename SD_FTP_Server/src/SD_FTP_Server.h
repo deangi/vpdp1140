@@ -33,6 +33,9 @@ public:
     const char* vfs_root    = "/sdcard"; // POSIX mount point of the SD card
     void (*log_fn)(const char* msg)     = nullptr;  // optional info logger
     void (*log_err_fn)(const char* msg) = nullptr;  // optional error logger
+    // Return true when an FTP path names a mounted image, or a directory
+    // containing one. Protected paths cannot be transferred or mutated.
+    bool (*path_protected_fn)(const char* ftp_path) = nullptr;
   };
 
   void     begin(const Config& cfg);
@@ -43,3 +46,17 @@ public:
 };
 
 extern SD_FTP_Server SDFTPServer;
+
+// Shared recursive lock for every SD operation that can run concurrently
+// with FTP. Emulator disk backends should hold this around open/close,
+// seek/read/write, and image creation.
+void sd_ftp_storage_lock();
+void sd_ftp_storage_unlock();
+
+class SD_FTP_StorageGuard {
+public:
+  SD_FTP_StorageGuard()  { sd_ftp_storage_lock(); }
+  ~SD_FTP_StorageGuard() { sd_ftp_storage_unlock(); }
+  SD_FTP_StorageGuard(const SD_FTP_StorageGuard&) = delete;
+  SD_FTP_StorageGuard& operator=(const SD_FTP_StorageGuard&) = delete;
+};

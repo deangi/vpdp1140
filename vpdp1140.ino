@@ -27,7 +27,7 @@
 // Need to go to tools : USB CDC on boot - enable, enable OPI PSRAM, set flash to 16MB
 // V1.0 23-May-2026, Dean Gienger, Claude
 // Set up to boot from a RL02 disk (10mb) - eventually support 2 RL02 disks (DL0 and DL1)
-// and 2 floppy's DX0/DX1 (RX02 model 512kb)
+// and four RL11 units DL0..DL3.
 //
 // RL02K disks are single-platter cartridges with 512 tracks per side, 40 sectors per track, and 
 // a sector size of 256 bytes, for a total capacity of 10Mb (10,485,760 bytes). They are used in 
@@ -122,12 +122,12 @@ enum {
   ROW_PSRAM = 0, ROW_SD, ROW_CFG, ROW_BOOT, ROW_WIFI, ROW_IP, ROW_CPU
 };
 
-// Boot drive unit label (e.g. "DL0", "DL1", "DX0", "DX1", "RK0") and the
+// Boot drive unit label (e.g. "DL0", "DL1", "DL2", "DL3", "RK0") and the
 // configured image path for the slot named by cfg.boot_drive ('a'..'d').
 static const char* boot_unit_label() {
   int slot = (cfg.boot_drive >= 'a' && cfg.boot_drive <= 'd')
                ? (cfg.boot_drive - 'a') : 0;
-  static const char* rl_names[4] = { "DL0", "DL1", "DX0", "DX1" };
+  static const char* rl_names[4] = { "DL0", "DL1", "DL2", "DL3" };
   if (slot == 0 && cfg.boot_kind == AppConfig::BK_RK) return "RK0";
   return rl_names[slot];
 }
@@ -249,7 +249,7 @@ static void disks_mount() {
     &cfg.disk_b, &cfg.disk_c, &cfg.disk_d
   };
   const char* unit_names[DRIVE_COUNT] = {
-    rk_boot ? "RK0" : "DL0", "DL1", "DX0", "DX1"
+    rk_boot ? "RK0" : "DL0", "DL1", "DL2", "DL3"
   };
   for (int s = 0; s < DRIVE_COUNT; s++) {
     if (paths[s]->length() == 0) continue;
@@ -269,11 +269,11 @@ static void draw_status_bar() {
 
   tft.drawFastHLine(0, sy, TFT_W, TFT_DARKGREY);
 
-  // Drive indicators DL0/DL1/DX0/DX1 (or RK0/DL1/DX0/DX1 when booting RK05) -
+  // Drive indicators DL0..DL3 (or RK0/DL1/DL2/DL3 when booting RK05) -
   // green=mounted, yellow=active, dim=empty.
   const char* unit_labels[DRIVE_COUNT] = {
     (cfg.boot_kind == AppConfig::BK_RK) ? "RK0" : "DL0",
-    "DL1", "DX0", "DX1"
+    "DL1", "DL2", "DL3"
   };
   for (int s = 0; s < DRIVE_COUNT; s++) {
     uint32_t r = 0, w = 0;
@@ -334,7 +334,7 @@ static void draw_status_bar() {
   tft.setTextDatum(TL_DATUM);   // restore for the title row below
 
   // [system] title from pdpconfig.ini, drawn below the drive indicators
-  // (left half, the empty strip under the DL0/DL1/DX0/DX1 boxes). Falls
+  // (left half, the empty strip under the DL0..DL3 boxes). Falls
   // back to APP_TITLE if the user left the field blank.
   tft.fillRect(0, sy + 22, 156, TFT_H - sy - 22, TFT_BLACK);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
@@ -405,6 +405,27 @@ static void render_task(void* arg) {
       if (now - status_ms >= 500) { status_ms = now; draw_status_bar(); }
     }
     vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+
+// Telnet contains no SD-card operations, so it can run independently on
+// core 0. FTP remains on core 1 until the shared storage layer can serialize
+// FTP mutations against live PDP-11 disk-image access.
+static void net_task(void* arg) {
+  (void)arg;
+  uint32_t wifi_ms = 0;
+  for (;;) {
+    telnet_poll();
+
+    uint32_t now = millis();
+    if (now - wifi_ms >= 10000) {
+      wifi_ms = now;
+      if (WiFi.status() != WL_CONNECTED) {
+        LOGE("WiFi link down - reconnecting");
+        WiFi.reconnect();
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
 
@@ -481,26 +502,28 @@ void setup() {
     if (cfg.boot_kind == AppConfig::BK_RK) boot_name = "RK0";
     else boot_name = (cfg.boot_drive == 'a') ? "DL0"
                    : (cfg.boot_drive == 'b') ? "DL1"
-                   : (cfg.boot_drive == 'c') ? "DX0"
-                   : (cfg.boot_drive == 'd') ? "DX1" : "?";
+                   : (cfg.boot_drive == 'c') ? "DL2"
+                   : (cfg.boot_drive == 'd') ? "DL3" : "?";
     cpu_set_boot_kind(cfg.boot_kind == AppConfig::BK_RK ? 1 : 0);
     LOG("--- booting PDP-11 from %s, console -> TFT ---", boot_name);
     start_cpu(false);
     cpu_running = true;
     led(0, 0, 32);          // blue = PDP-11 booting
 
-    // Spin up the core-0 rendering task. The PDP-11 then runs in loop() on core 1.
+    // Spin up core-0 display and Telnet tasks. The PDP-11 and all SD-card
+    // activity remain on core 1.
     g_ui_mutex = xSemaphoreCreateMutex();
     xTaskCreatePinnedToCore(render_task, "render", 10240, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(net_task,    "net",     8192, NULL, 2, NULL, 0);
   } else {
     tft_status(ROW_CPU, "CPU:   ", "alloc FAILED", TFT_RED);
     led(32, 0, 0);
   }
 }
 
-// loop() runs on core 1 and IS the PDP-11: CPU emulation plus telnet/FTP, touch
-// and the settings-menu logic. It never touches the TFT - render_task (core
-// 0) owns the display.
+// loop() runs on core 1 and IS the PDP-11: CPU emulation plus FTP, touch and
+// settings-menu logic. It never touches the TFT; render_task owns the display
+// and net_task owns Telnet on core 0.
 // Touch handling lives at file scope so cpu_run's per-slice work and the
 // menu-open early-return path can share the same state. The 750 ms
 // window is wider than the original 450 ms because users were missing
@@ -535,7 +558,6 @@ void loop() {
 
   static bool     boot_done = false;
   static bool     btn_prev  = true;
-  static uint32_t wifi_ms   = 0;
 
   poll_touch_once();
 
@@ -562,14 +584,17 @@ void loop() {
     ESP.restart();   // does not return
   }
 
-  // While the menu is open the PDP-11 is paused; just keep polling for taps.
-  if (ui_is_open()) { delay(8); return; }
+  // While the menu is open the PDP-11 is paused, but FTP remains available.
+  if (ui_is_open()) {
+    ftp_poll();
+    delay(8);
+    return;
+  }
 
-  // Running: feed the keyboard, run the PDP-11 in small slices, service
-  // telnet/FTP between slices so the network services stay responsive, and
+  // Running: feed the keyboard, run the PDP-11 in small slices, service FTP
+  // between slices, and
   // drain the KL11->host output FIFOs (USB-Serial + TFT) so the 8 KB
-  // rings stay near empty during steady-state output. Telnet's TX FIFO
-  // is drained inside telnet_poll().
+  // rings stay near empty during steady-state output.
   for (int slice = 0; slice < 5; slice++) {
     // Per-slice touch poll: cpu_run(8000) takes ~8 ms, so polling here
     // catches the second tap of a fast double-tap that would otherwise
@@ -578,13 +603,11 @@ void loop() {
     poll_touch_once();
     while (Serial.available())
       console_key_push((uint8_t)Serial.read());   // -> Serial-in FIFO
-    telnet_poll();               // accept + RX -> Telnet-in FIFO, flush TX FIFO
     ftp_poll();                  // accept + FTP commands/data against SD root
     cpu_run(8000);
     console_drain_tft();         // TFT-out FIFO -> ANSI parser -> cell grid
     kl11::drain_serial_out();    // Serial-out FIFO -> Serial.write
   }
-  telnet_poll();
   ftp_poll();
   console_drain_tft();
   kl11::drain_serial_out();
@@ -611,16 +634,6 @@ void loop() {
     // diagnosis - the cpu_pdp11.h function dumps the last N entries of
     // the trace ring. We leave it off by default so the serial console
     // stays usable for the guest OS.
-  }
-
-  // WiFi health check (~0.1 Hz).
-  uint32_t now = millis();
-  if (now - wifi_ms >= 10000) {
-    wifi_ms = now;
-    if (WiFi.status() != WL_CONNECTED) {
-      LOGE("WiFi link down - reconnecting");
-      WiFi.reconnect();
-    }
   }
 
   // Status LED: blue while booting, green once the PDP-11 has gone quiet at a prompt.
