@@ -75,6 +75,7 @@ void switchmode(uint8_t newm);
 
 void trapat(uint16_t vec);
 void interrupt(uint8_t vec, uint8_t pri);
+void cancelinterrupt(uint8_t vec);
 void handleinterrupt();
 
 bool N();

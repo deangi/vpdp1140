@@ -20,6 +20,10 @@ void ui_draw(TFT_eSPI& tft);
 // One-shot: returns true once if the user asked to reboot the PDP-11.
 bool ui_consume_reboot();
 
+// One-shot: returns true once if the user changed boot media/controller and
+// the host should remount disks and reboot the PDP-11.
+bool ui_consume_boot_change();
+
 // One-shot: returns true once if the user asked to fully reset the ESP32.
 // loop() consumes this and calls ESP.restart() outside the tap handler,
 // so the UI mutex is released and the host-side Serial drain has a chance

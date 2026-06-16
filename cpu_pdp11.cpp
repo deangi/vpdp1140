@@ -25,6 +25,7 @@
 #include "kwp.h"
 #include "rk11.h"
 #include "rl11.h"
+#include "lp11.h"
 #include "ky11.h"
 #include "dd11.h"
 #include "bootrom.h"
@@ -68,6 +69,8 @@ struct TrapEntry {
 #define TRAP_RING_SIZE 32
 static TrapEntry s_trap_ring[TRAP_RING_SIZE];
 static uint32_t  s_trap_idx = 0;
+static constexpr bool DISK_IRQ_TRACE = false;
+static int       s_disk_irq_trace_left = 32;
 
 // sam11 stubs (referenced only in PRINTSIMLINES / DEBUG paths, all
 // compile-time false in our build, but the symbols still need to exist).
@@ -212,6 +215,7 @@ void cpu_reset() {
   kd11::reset();
   rl11::reset();
   rk11::reset();
+  lp11::reset();
   kwp::reset();
 
   // Install the chosen boot ROM at BOOT_START (02000 octal). kd11::reset()
@@ -300,6 +304,7 @@ void cpu_reset() {
     s_trap_ring[i].sp = 0;
   }
   s_trap_idx = 0;
+  s_disk_irq_trace_left = 32;
 
   s_sam11_inited = true;
   s_halt_requested = false;
@@ -347,7 +352,17 @@ uint32_t cpu_run(uint32_t max_cycles) {
     // Do NOT return here, or we never get to actually run an instruction
     // when the line clock or other periodic IRQ is pending most of the
     // time (MIPS would read 0).
-    if (itab[0].vec && (itab[0].pri >= ((kd11::PS >> 5) & 7))) {
+    // PDP-11 interrupt requests are accepted only when their BR level is
+    // strictly greater than the current PSW priority. Accepting an equal
+    // level makes a BR4 KL11 appear to software as a higher-priority device.
+    if (itab[0].vec && (itab[0].pri > ((kd11::PS >> 5) & 7))) {
+      if (DISK_IRQ_TRACE && s_disk_irq_trace_left > 0 &&
+          (itab[0].vec == INTRK || itab[0].vec == INTRL)) {
+        LOG("CPU IRQ deliver vec=%03o BR%u PC=%06o PS=%06o",
+            (unsigned)itab[0].vec, (unsigned)itab[0].pri,
+            (unsigned)kd11::R[7], (unsigned)kd11::PS);
+        s_disk_irq_trace_left--;
+      }
       kd11::handleinterrupt();
     }
     // Record this instruction in the trace ring BEFORE step() runs,
@@ -364,6 +379,8 @@ uint32_t cpu_run(uint32_t max_cycles) {
     kw11::tick();
     kwp::tick();    // KW11-P programmable clock countdown
     rk11::tick();   // drives the deferred RK-done IRQ countdown
+    rl11::tick();   // drives the deferred RL-done IRQ countdown
+    lp11::poll();
     kl11::poll();
     executed++;
     s_inst_count++;

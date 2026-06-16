@@ -181,17 +181,11 @@ void poll()
     //      (which pops it from itab).
     //  (c) inter-character delay: at least serial_in_delay_ms ms have
     //      elapsed since the last addchar. Without (c), a fast host-side
-    //      burst can queue the next INTTTYIN while klrint is still
-    //      running on the prior byte; sam11's IRQ check fires at >=
-    //      priority (not strictly >, as a real PDP-11 would), so the
-    //      second INTTTYIN re-enters klrint. The nested klrint saves
-    //      the in-progress R0 (which holds the first byte) to the
-    //      stack and reads the freshly-pushed TKB; V6's ttyinput()
-    //      then receives the bytes in LIFO order as the stack unwinds.
-    //      A small ms gap matches what a real serial line would have
-    //      enforced via baud-rate timing, and stays OS-agnostic
-    //      (no PSW priority inspection). serial_in_delay_ms is set
-    //      from [diag] serialdelay in pdpconfig.ini.
+    //      burst can otherwise load the next byte immediately after the
+    //      prior IRQ is acknowledged. A small ms gap matches what a real
+    //      serial line would have enforced via baud-rate timing and stays
+    //      OS-agnostic (no PSW priority inspection). serial_in_delay_ms is
+    //      set from [diag] serialdelay in pdpconfig.ini.
     //
     // Wraparound: millis() wraps every ~49.7 days. The unsigned
     // subtraction (now - s_last_addchar_ms) wraps correctly for any

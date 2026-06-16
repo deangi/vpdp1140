@@ -39,11 +39,11 @@ bool disk_mount(int slot, const char* path) {
   }
   uint32_t sz = (uint32_t)f.size();
 
-  // PDP-11 era disk images come in many sizes (RL01 = 5 MB, RL02 = 10 MB,
-  // RX01 = 256 KB, RX02 = 512 KB, RK05 = 2.5 MB ...) and some carry small
-  // SimH-style headers. Accept anything between 100 KB and 32 MB; the
-  // RL11 / RK11 / RX11 emulators are responsible for sanity-checking
-  // offsets against the slot's actual size.
+  // PDP-11 era disk images come in several sizes (RL01 = 5 MB,
+  // RL02 = 10 MB, RK05 = 2.5 MB) and some carry small SimH-style
+  // headers. Accept anything between 100 KB and 32 MB; the RL11/RK11
+  // emulators are responsible for sanity-checking offsets against the
+  // slot's actual size.
   const uint32_t MIN_IMAGE = 100u * 1024u;
   const uint32_t MAX_IMAGE = 32u * 1024u * 1024u;
   if (sz < MIN_IMAGE || sz > MAX_IMAGE) {

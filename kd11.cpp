@@ -79,6 +79,11 @@ void reset(void)
     {
         R[i] = 0;
     }
+    for (i = 0; i < ITABN; i++)
+    {
+        itab[i].vec = 0;
+        itab[i].pri = 0;
+    }
     kt11::SLR = 0400;
     PS = 0;
     KSP = 0;
@@ -274,6 +279,7 @@ void step()
     debug_step();
 
     curPC = R[7];
+    kt11::begin_instruction(curPC);
     uint16_t instr = dd11::read16(kt11::decode_instr(R[7], false, curuser));
     // return;
     R[7] += 2;

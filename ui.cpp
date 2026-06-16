@@ -45,8 +45,9 @@ enum Screen { SC_CLOSED, SC_MAIN, SC_DRIVES, SC_DRIVE, SC_PICKER, SC_INFO, SC_BR
 static Screen   g_screen = SC_CLOSED;
 static bool     g_dirty  = false;
 static bool     g_reboot = false;
+static bool     g_boot_change = false;
 static bool     g_esp_restart = false;   // m15: full ESP32 hardware reset requested
-static int      g_sel    = 0;          // drive index for SC_DRIVE / SC_PICKER
+static int      g_sel    = 0;          // drive index for SC_DRIVE / SC_PICKER; 4 = RK0
 static int      g_scroll = 0;
 static uint8_t  g_bright = 255;
 
@@ -78,12 +79,15 @@ void ui_init() {
   g_screen = SC_CLOSED;
   g_dirty = false;
   g_reboot = false;
+  g_boot_change = false;
+  g_esp_restart = false;
   ledcAttach(TFT_BL, 5000, 8);
   ledcWrite(TFT_BL, g_bright);
 }
 
 bool ui_is_open()             { return g_screen != SC_CLOSED; }
 bool ui_consume_reboot()      { bool r = g_reboot;      g_reboot      = false; return r; }
+bool ui_consume_boot_change() { bool r = g_boot_change; g_boot_change = false; return r; }
 bool ui_consume_esp_restart() { bool r = g_esp_restart; g_esp_restart = false; return r; }
 
 // ---- scan SD root for mountable images ----
@@ -111,6 +115,27 @@ static void scan_files() {
   root.close();
 }
 
+static String& cfg_disk_path(int slot) {
+  switch (slot) {
+    case DRIVE_A: return cfg.disk_a;
+    case DRIVE_B: return cfg.disk_b;
+    case DRIVE_C: return cfg.disk_c;
+    default:      return cfg.disk_d;
+  }
+}
+
+static bool slot_live(int slot) {
+  return slot != DRIVE_A || cfg.boot_kind == AppConfig::BK_RL;
+}
+
+static bool slot_has_image(int slot) {
+  return slot_live(slot) ? disk_is_mounted(slot) : cfg_disk_path(slot).length() > 0;
+}
+
+static const char* slot_display_path(int slot) {
+  return slot_live(slot) ? disk_path(slot) : cfg_disk_path(slot).c_str();
+}
+
 // ---- build the item list / title for the current screen ----
 static void rebuild() {
   g_count = 0;
@@ -128,28 +153,37 @@ static void rebuild() {
     case SC_DRIVES:
       strcpy(g_title, "Drives");
       {
+        strcpy(g_items[g_count++],
+               cfg.boot_kind == AppConfig::BK_RL ? "Boot RL0 [active]" : "Boot RL0");
+        strcpy(g_items[g_count++],
+               cfg.boot_kind == AppConfig::BK_RK ? "Boot RK0 [active]" : "Boot RK0");
+        if (cfg.disk_rk0.length())
+          snprintf(g_items[g_count++], 44, "RK0 %s", cfg.disk_rk0.c_str());
+        else
+          strcpy(g_items[g_count++], "RK0 (empty)");
         static const char* const ui_unit_names[4] = { "DL0", "DL1", "DL2", "DL3" };
         for (int s = 0; s < 4; s++) {
-          if (disk_is_mounted(s))
+          if (slot_has_image(s))
             snprintf(g_items[g_count++], 44, "%s %s%s", ui_unit_names[s],
-                     disk_path(s),
-                     disk_is_readonly(s) ? " [RO]" : "");
+                     slot_display_path(s),
+                     (slot_live(s) && disk_is_readonly(s)) ? " [RO]" : "");
           else
             snprintf(g_items[g_count++], 44, "%s (empty)", ui_unit_names[s]);
         }
       }
       break;
     case SC_DRIVE: {
-      static const char* const drv_unit_names[4] = { "DL0", "DL1", "DL2", "DL3" };
+      static const char* const drv_unit_names[5] = { "DL0", "DL1", "DL2", "DL3", "RK0" };
       snprintf(g_title, sizeof(g_title), "Drive %s", drv_unit_names[g_sel]);
       strcpy(g_items[g_count++],
-             disk_is_mounted(g_sel) ? "Change Image" : "Mount Image");
-      if (disk_is_mounted(g_sel))
+             (g_sel == 4 ? cfg.disk_rk0.length() : slot_has_image(g_sel))
+               ? "Change Image" : "Mount Image");
+      if (g_sel == 4 ? cfg.disk_rk0.length() : slot_has_image(g_sel))
         strcpy(g_items[g_count++], "Dismount");
       break;
     }
     case SC_PICKER: {
-      static const char* const pick_unit_names[4] = { "DL0", "DL1", "DL2", "DL3" };
+      static const char* const pick_unit_names[5] = { "DL0", "DL1", "DL2", "DL3", "RK0" };
       snprintf(g_title, sizeof(g_title), "Mount into %s", pick_unit_names[g_sel]);
       for (int i = 0; i < g_file_count; i++)
         strncpy(g_items[g_count++], g_files[i], 43);
@@ -257,21 +291,68 @@ static void activate(int idx) {        // idx = absolute item index
       else if (idx == 6) go(SC_CONFIRM_RESET);
       break;
     case SC_DRIVES:
-      g_sel = idx;                       // 0..3 -> A..D
-      if (disk_is_mounted(g_sel)) go(SC_DRIVE);
-      else { scan_files(); go(SC_PICKER); }
+      if (idx == 0) {
+        cfg.boot_kind = AppConfig::BK_RL;
+        cfg.boot_drive = 'a';
+        g_boot_change = true;
+        g_screen = SC_CLOSED;
+        g_dirty = false;
+      } else if (idx == 1) {
+        cfg.boot_kind = AppConfig::BK_RK;
+        cfg.boot_drive = 'a';
+        g_boot_change = true;
+        g_screen = SC_CLOSED;
+        g_dirty = false;
+      } else if (idx == 2) {
+        g_sel = 4;                       // RK0 pseudo-drive
+        go(SC_DRIVE);
+      } else {
+        g_sel = idx - 3;                 // 3..6 -> DL0..DL3
+        if (slot_has_image(g_sel)) go(SC_DRIVE);
+        else { scan_files(); go(SC_PICKER); }
+      }
       break;
     case SC_DRIVE:
       if (idx == 0) { scan_files(); go(SC_PICKER); }
-      else          { disk_dismount(g_sel); go(SC_DRIVES); }
+      else if (g_sel == 4) {
+        cfg.disk_rk0 = "";
+        if (cfg.boot_kind == AppConfig::BK_RK) {
+          g_boot_change = true;
+          g_screen = SC_CLOSED;
+          g_dirty = false;
+        } else {
+          go(SC_DRIVES);
+        }
+      } else {
+        cfg_disk_path(g_sel) = "";
+        if (slot_live(g_sel))
+          disk_dismount(g_sel);
+        go(SC_DRIVES);
+      }
       break;
     case SC_PICKER: {
       if (g_file_count == 0 || idx >= g_file_count) break;
       char path[48];
       snprintf(path, sizeof(path), "/%s", g_files[idx]);
-      bool ok = disk_mount(g_sel, path);
-      LOG("ui: mount %c: %s -> %s", 'A' + g_sel, path, ok ? "ok" : "FAIL");
-      go(SC_DRIVES);
+      bool ok = false;
+      if (g_sel == 4) {
+        cfg.disk_rk0 = path;
+        if (cfg.boot_kind == AppConfig::BK_RK) {
+          ok = true;
+          g_boot_change = true;
+          g_screen = SC_CLOSED;
+          g_dirty = false;
+        } else {
+          ok = true;
+        }
+        LOG("ui: mount RK0: %s -> %s", path, ok ? "ok" : "FAIL");
+      } else {
+        cfg_disk_path(g_sel) = path;
+        ok = slot_live(g_sel) ? disk_mount(g_sel, path) : true;
+        LOG("ui: mount %c: %s -> %s", 'A' + g_sel, path, ok ? "ok" : "FAIL");
+      }
+      if (g_screen != SC_CLOSED)
+        go(SC_DRIVES);
       break;
     }
     case SC_BRIGHT:
@@ -374,7 +455,10 @@ static void draw_list() {
     if (idx >= g_count) break;
     int y = ITEM_Y0 + i * ITEM_H;
     uint16_t bg = COL_ITEM;
-    if (g_screen == SC_DRIVES && idx < 4 && disk_is_mounted(idx)) bg = COL_ITEM_HI;
+    if (g_screen == SC_DRIVES && idx == 0 && cfg.boot_kind == AppConfig::BK_RL) bg = COL_ITEM_HI;
+    if (g_screen == SC_DRIVES && idx == 1 && cfg.boot_kind == AppConfig::BK_RK) bg = COL_ITEM_HI;
+    if (g_screen == SC_DRIVES && idx == 2 && cfg.disk_rk0.length()) bg = COL_ITEM_HI;
+    if (g_screen == SC_DRIVES && idx >= 3 && idx < 7 && slot_has_image(idx - 3)) bg = COL_ITEM_HI;
     // SC_MAIN items 5 (Reboot PDP-11) and 6 (Reset ESP32) are destructive.
     if (g_screen == SC_MAIN && (idx == 5 || idx == 6)) bg = COL_DANGER;
     if (g_screen == SC_DRIVE && idx == 1) bg = COL_DANGER;

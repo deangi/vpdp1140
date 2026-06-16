@@ -41,6 +41,7 @@ bool isReg(const uint16_t a)
 static void push(const uint16_t v)
 {
     R[6] -= 2;
+    kt11::record_reg_change(6, -2);
     write16(R[6], v);
 }
 
@@ -48,6 +49,7 @@ static uint16_t pop()
 {
     const uint16_t val = read16(R[6]);
     R[6] += 2;
+    kt11::record_reg_change(6, 2);
     return val;
 }
 
@@ -114,9 +116,11 @@ static uint16_t aget(uint8_t v, uint8_t l)
     case 020:
         addr = R[v & 07];
         R[v & 07] += l;
+        kt11::record_reg_change(v & 07, l);
         break;
     case 040:
         R[v & 07] -= l;
+        kt11::record_reg_change(v & 07, -((int8_t)l));
         addr = R[v & 07];
         break;
     case 060:

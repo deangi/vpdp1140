@@ -34,7 +34,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 /*
  * The PDP-11 series of processors use hardware and software drivers with part
- * numbers with the pattern Letter.Letter.11 E.g. DD11 or RX11
+ * numbers with the pattern Letter.Letter.11 E.g. DD11 or RK11
  *
  * This code follows the original numbering scheme, with the different files
  * running the emulators for different parts of the emulated hardware.
@@ -72,7 +72,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  * KL11     Y   Main Console TTY Interface
  * KM11         Maintenance Device
  * KT11     Y+  Memory Management Unit (11/40 compliant ONLY)
- * KW11     *   Line Time Clock (P revision is also RTC - not implemented)
+ * KW11     *   KW11-L line clock and optional KW11-P programmable clock
  * KY11-D   +   Developer/Diagnostics Console (front panel)
  *
  * KE11-F   P*+ Floating Point Instructions Extension
@@ -114,8 +114,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  * TC11         TU DECtape Controller (TU56)
  * TM11     +   TU/TE Magnetic Tape Controller (TU10)   MT
  * CR11         CR/CM Card Controller (aka CM11)
- * RX11         RX Floppy Disk Controller (RX01)
- * RX211        RX Floppy Disk Controller (RX01, RX02)  RX
  * TA11         TA Cassette Tape Controller (TU60)
  *
  * Printers:
@@ -197,7 +195,7 @@ enum
     INTAFC = 0134,     // Analogue control subsystem
     INTAAS = 0140,     // AA11 Scope
     INTAAL = 0144,     // AA11 Light
-    // 150 - 164 not used
+    INTRL = 0160,      // RL11 Disk Control
     INTUR0 = 0170,     // User Reserved
     INTUR1 = 0174,     // User Reserved
     INTLP = 0200,      // Line Printer
@@ -213,7 +211,7 @@ enum
     INTMMUERR = 0250,  // MMU Error
     INTRP = 0254,      // RP Disk Control
     INTTA = 0260,      // TA11 Cassette Control
-    INTRX = 0264,      // RX11 Floppy Control
+    // 264 unused
     INTUR2 = 0270,     // User Reserved
     INTUR3 = 0274,     // User Reserved
     INTFLOAT = 0300,   // Start of floating vectors

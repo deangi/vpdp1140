@@ -93,55 +93,55 @@ void interrupt(uint8_t vec, uint8_t pri)
         }
         panic();
     }
-    // fast path
-    if (itab[0].vec == 0)
-    {
-        itab[0].vec = vec;
-        itab[0].pri = pri;
-        return;
+    uint8_t count = 0;
+    while (count < ITABN && itab[count].vec != 0) {
+        // A level-sensitive device has only one pending request per vector.
+        if (itab[count].vec == vec)
+            return;
+        count++;
     }
-    uint8_t i;
-    for (i = 0; i < ITABN; i++)
-    {
-        if ((itab[i].vec == 0) || (itab[i].pri < pri))
-        {
-            break;
-        }
-    }
-    for (; i < ITABN; i++)
-    {
-        if ((itab[i].vec == 0) || (itab[i].vec >= vec))
-        {
-            break;
-        }
-    }
-    if (i >= ITABN)
+
+    if (count >= ITABN)
     {
         if (PRINTSIMLINES)
         {
-            _printf("%%%% interrupt table full (%i of %i)", i, ITABN);
+            _printf("%%%% interrupt table full (%i of %i)", count, ITABN);
         }
         panic();
+        return;
     }
-    uint8_t j;
-    for (j = i + 1; j < ITABN; j++)
-    {
+
+    // Highest BR level wins. At the same level, the lower vector has
+    // higher UNIBUS arbitration priority.
+    uint8_t pos = 0;
+    while (pos < count &&
+           (itab[pos].pri > pri ||
+            (itab[pos].pri == pri && itab[pos].vec < vec))) {
+        pos++;
+    }
+
+    // Shift from the tail toward the insertion point. The old forward
+    // shift repeatedly copied one entry and corrupted every queued IRQ
+    // after it.
+    for (uint8_t j = count; j > pos; j--)
         itab[j] = itab[j - 1];
-    }
-    itab[i].vec = vec;
-    itab[i].pri = pri;
+
+    itab[pos].vec = vec;
+    itab[pos].pri = pri;
 }
 
-// pop the top interrupt off the itab.
-static void popirq()
+void cancelinterrupt(uint8_t vec)
 {
-    uint8_t i;
-    for (i = 0; i < ITABN - 1; i++)
-    {
-        itab[i] = itab[i + 1];
+    uint8_t out = 0;
+    for (uint8_t in = 0; in < ITABN; in++) {
+        if (itab[in].vec != 0 && itab[in].vec != vec)
+            itab[out++] = itab[in];
     }
-    itab[ITABN - 1].vec = 0;
-    itab[ITABN - 1].pri = 0;
+    while (out < ITABN) {
+        itab[out].vec = 0;
+        itab[out].pri = 0;
+        out++;
+    }
 }
 
 void handleinterrupt()
@@ -155,25 +155,26 @@ void handleinterrupt()
             Serial.println(vec, OCT);
         }
     }
-    uint16_t vv = setjmp(trapbuf);
-    if (vv == 0)
-    {
-        uint16_t prev = PS;
-        switchmode(0);
-        push(prev);
-        push(R[7]);
-    }
-    else
-    {
-        trapat(vv);
-    }
+
+    // The UNIBUS interrupt grant acknowledges this device before the CPU
+    // begins stacking state and fetching the vector. A device can have only
+    // one outstanding request for a vector, so discard every stale duplicate
+    // rather than merely shifting one entry. This also prevents a corrupted
+    // or previously duplicated request from starving lower-priority devices.
+    // Do not install a nested setjmp in the shared global trapbuf: after this
+    // function returned, trapbuf pointed into a dead stack frame.
+    cancelinterrupt(vec);
+
+    uint16_t prev = PS;
+    switchmode(0);
+    push(prev);
+    push(R[7]);
 
     R[7] = dd11::read16(vec);
     PS = dd11::read16(vec + 2);
     PS |= (curuser << 14);
     PS |= (prevuser << 12);
     waiting = false;
-    popirq();
 }
 
 #endif

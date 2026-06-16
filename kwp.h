@@ -1,12 +1,7 @@
-// KW11-P Programmable Real-Time Clock emulation for vpdp1140.
-//
-// Three live registers at 0o772540..0o772544 (CSR, CSB, CNTR). Counts down
-// at a programmable rate; on underflow sets DONE and (if IE) interrupts at
-// vector INTRTC=0o104, BR5. In repeat mode the counter reloads from CSB.
-//
-// Added to give RSTS V7 / RT-11 / RSX a scheduler-quantum tick source.
-// Previously stubbed in dd11.cpp; that stub block is now removed for this
-// address range.
+// DEC KW11-P programmable real-time clock at 0o772540.
+// Implements the CSR, count-set buffer, live counter, four rates,
+// up/down counting, manual tick, one-shot/repeat, DONE/ERR, and the
+// vector 0104 BR6 interrupt.
 
 #pragma once
 #include "pdp1140.h"
@@ -17,11 +12,8 @@ extern uint16_t CSR;
 extern uint16_t CSB;
 extern uint16_t CNTR;
 
-// Runtime gate: when false the module is a pure absorber - all reads
-// in the 0o772540..0o772556 window return 0, writes are silently
-// discarded, tick() is a no-op. Required for RSTS V4B (a working
-// KW11-P breaks its terminal driver's case handling). Set by
-// vpdp1140.ino from cfg.kwp_enabled after config_load_pdp.
+// Runtime gate. When false, the compatibility window reads as zero and
+// discards writes. Set from pdpconfig.ini before CPU reset.
 extern bool enabled;
 
 void     reset();

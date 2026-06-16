@@ -266,21 +266,20 @@ static void parse_line(AppConfig& cfg, String& section, const String& raw,
   } else if (section == "disks") {
     // Drive slot 0..3 maps to RL11 unit names dl0..dl3. Internally we
     // still index by char 'a'..'d' to keep the slot-array indexing in
-    // vpdp1140.ino simple. dx0/dx1 remain accepted as legacy aliases. rk0 is a
-    // separate logical key that, when boot=rk0, gets mounted at slot 0
-    // in place of dl0 so the RK11 controller can find it.
+    // vpdp1140.ino simple. rk0 is a separate logical key that, when boot=rk0,
+    // gets mounted at slot 0 in place of dl0 so the RK11 controller can find it.
     if      (key == "dl0")      cfg.disk_a = val;
     else if (key == "dl1")      cfg.disk_b = val;
-    else if (key == "dl2" || key == "dx0") cfg.disk_c = val;
-    else if (key == "dl3" || key == "dx1") cfg.disk_d = val;
+    else if (key == "dl2")      cfg.disk_c = val;
+    else if (key == "dl3")      cfg.disk_d = val;
     else if (key == "rk0")      cfg.disk_rk0 = val;
     else if (key == "boot") {
       String v = to_lower(val);
       cfg.boot_kind = AppConfig::BK_RL;
       if      (v == "dl0" || v == "0")  cfg.boot_drive = 'a';
       else if (v == "dl1" || v == "1")  cfg.boot_drive = 'b';
-      else if (v == "dl2" || v == "dx0" || v == "2") cfg.boot_drive = 'c';
-      else if (v == "dl3" || v == "dx1" || v == "3") cfg.boot_drive = 'd';
+      else if (v == "dl2" || v == "2") cfg.boot_drive = 'c';
+      else if (v == "dl3" || v == "3") cfg.boot_drive = 'd';
       // rk0 (DEC) / dk0 (Bell Labs Unix V6 device name) both mean the RK05.
       else if (v == "rk0" || v == "dk0") {
         cfg.boot_drive = 'a';
@@ -436,7 +435,10 @@ bool config_write_default_pdp(const AppConfig& cfg) {
   f.println(";               set false to attempt RSTS/E V7 (V4B will not");
   f.println(";               boot in that mode).");
   f.println("; kwp_enabled = activate the KW11-P programmable real-time clock");
-  f.println(";               at 0o772540. Default false (stub mode) because");
+  f.println(";               at 0o772540 (vector 0104, BR6). Implements the");
+  f.println(";               100 kHz, 10 kHz, line and external rates plus");
+  f.println(";               up/down, one-shot/repeat, DONE and overrun.");
+  f.println(";               Default false (stub mode) because");
   f.println(";               RSTS V4B sees a working KW11-P and programs it");
   f.println(";               for interrupts that break its terminal echo");
   f.println(";               (upper case shows as lower case). Set true only");

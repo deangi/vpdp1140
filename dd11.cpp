@@ -70,6 +70,36 @@ namespace dd11 {
 // pdpconfig.ini [diag] v4b_quirks at boot.
 bool v4b_quirks_enabled = true;
 
+static constexpr bool DD11_TRACE_EXPECTED_BUS_PROBES = false;
+
+static bool quiet_expected_probe(const uint32_t a)
+{
+    if (DD11_TRACE_EXPECTED_BUS_PROBES) {
+        return false;
+    }
+
+#if STRICT_11_40
+    // RT-11 sweeps the optional CPU-internal registers between the 11/40
+    // register window and CPU error register. They are absent on an 11/40,
+    // so the bus error is correct and expected; only suppress its log noise.
+    if (a >= 0777710 && a <= 0777764) {
+        return true;
+    }
+
+    // 2.11BSD probes SR3 to detect split I/D-capable MMUs. A strict 11/40
+    // does not implement SR3, so the bus error is correct but expected.
+    if (a == DEV_MMU_SR3) {
+        return true;
+    }
+#else
+    (void)a;
+#endif
+
+    // RT-11 repeatedly reads the CR11/CM11 status register while checking
+    // whether an optional card reader is installed.
+    return a == DEV_CR_S;
+}
+
 uint16_t read8(const uint32_t a)
 {
 #if !KY_PANEL
@@ -88,6 +118,12 @@ uint16_t read8(const uint32_t a)
 
 void write8(const uint32_t a, const uint16_t v)
 {
+    // The KW11-P does not support byte writes. In particular, do not use
+    // the generic read/modify/write path because reading its CSR acknowledges
+    // DONE and clears the pending interrupt.
+    if (a >= DEV_KWP_CSR && a <= 0772557)
+        return;
+
 #if !KY_PANEL
     // If the KY_PANEL is enabled, route everything as words
     if (a < MAX_RAM_ADDRESS)
@@ -98,7 +134,7 @@ void write8(const uint32_t a, const uint16_t v)
 #endif
     if (a % 2 != 0)
     {
-        write16(a & ~1, (read16(a) & 0xFF) | ((v & 0xFF) << 8));
+        write16(a & ~1, (read16(a & ~1) & 0xFF) | ((v & 0xFF) << 8));
     }
     else
     {
@@ -117,6 +153,8 @@ void write16(uint32_t a, uint16_t v)
             Serial.print(F(" to odd address 0"));
             Serial.println(a, OCT);
         }
+        LOG("dd11: WRITE odd-address trap @ %06o (val=%06o, PC=%06o)",
+            (unsigned)a, (unsigned)v, (unsigned)kd11::curPC);
         longjmp(trapbuf, INTBUS);
     }
 
@@ -242,17 +280,15 @@ void write16(uint32_t a, uint16_t v)
         return;
 
     case DEV_MMU_SR0:
-        kt11::SR0 = v;
+        kt11::write_sr0(v);
         return;
 
-#if !STRICT_11_40
     case DEV_MMU_SR1:
-        kt11::SR1 = v;
+        // MMR1 and MMR2 are maintained by the processor for instruction
+        // restart. Program writes do not alter them.
         return;
-#endif
 
     case DEV_MMU_SR2:
-        kt11::SR2 = v;
         return;
 
 #if !STRICT_11_40
@@ -348,7 +384,7 @@ void write16(uint32_t a, uint16_t v)
         return;
     }
 
-    if (PRINTSIMLINES)
+    if (PRINTSIMLINES && !quiet_expected_probe(a))
     {
         Serial.print(F("%% dd11: write to invalid address 0"));
         Serial.println(a, OCT);
@@ -358,8 +394,10 @@ void write16(uint32_t a, uint16_t v)
     // V4B is probing. LOG is gated by g_serial_silenced so it'll quiet
     // down once we panic; before that, every device-probe bus error
     // prints one line. Cheap and very informative for the next probe.
-    LOG("dd11: WRITE bus-error trap @ %06o (val=%06o, PC=%06o)",
-        (unsigned)a, (unsigned)v, (unsigned)kd11::curPC);
+    if (!quiet_expected_probe(a)) {
+        LOG("dd11: WRITE bus-error trap @ %06o (val=%06o, PC=%06o)",
+            (unsigned)a, (unsigned)v, (unsigned)kd11::curPC);
+    }
 
     longjmp(trapbuf, INTBUS);
 }
@@ -373,6 +411,8 @@ uint16_t read16(uint32_t a)
             Serial.print(F("%% dd11: read16 from odd address 0"));
             Serial.println(a, OCT);
         }
+        LOG("dd11: READ odd-address trap @ %06o (PC=%06o)",
+            (unsigned)a, (unsigned)kd11::curPC);
         longjmp(trapbuf, INTBUS);
     }
 
@@ -450,11 +490,9 @@ uint16_t read16(uint32_t a)
         readReturn kt11::SR0;
         break;
 
-#if !STRICT_11_40
     case DEV_MMU_SR1:
         readReturn kt11::SR1;
         break;
-#endif
 
     case DEV_MMU_SR2:
         readReturn kt11::SR2;
@@ -537,15 +575,17 @@ uint16_t read16(uint32_t a)
         return 0;
     }
 
-    if (PRINTSIMLINES)
+    if (PRINTSIMLINES && !quiet_expected_probe(a))
     {
         Serial.print(F("%% dd11: read from invalid address 0"));
         Serial.println(a, OCT);
     }
 
     // Diagnostic: see write16 above.
-    LOG("dd11: READ bus-error trap @ %06o (PC=%06o)",
-        (unsigned)a, (unsigned)kd11::curPC);
+    if (!quiet_expected_probe(a)) {
+        LOG("dd11: READ bus-error trap @ %06o (PC=%06o)",
+            (unsigned)a, (unsigned)kd11::curPC);
+    }
 
     longjmp(trapbuf, INTBUS);
 }

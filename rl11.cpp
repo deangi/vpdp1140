@@ -32,12 +32,25 @@
 #include "sam11.h"
 #include "dd11.h"
 #include "disk.h"
+#include "platform.h"
+#ifdef PS
+#undef PS
+#endif
+#include "kb11.h"
+#include "kd11.h"
+
+#if USE_11_45 && !STRICT_11_40
+#define procNS kb11
+#else
+#define procNS kd11
+#endif
 
 namespace rl11 {
 
 static const uint32_t SECS_PER_TRACK = 40;
 static const uint32_t SURFACES       = 2;
 static const uint32_t BYTES_PER_SEC  = 256;
+static const uint16_t IRQ_DELAY_TICKS = 2;
 
 // Programmable registers (all 16-bit on the bus).
 static uint16_t RLCS  = 0;
@@ -54,9 +67,26 @@ uint16_t rl_cur_cyl  = 0;
 uint16_t rl_cur_surf = 0;
 
 bool attached[4] = { false, false, false, false };
+static uint16_t irq_pending = 0;
+static constexpr bool IRQ_TRACE = false;
+static int irq_trace_left = 24;
+
+static void trace_irq(const char *event, uint16_t value)
+{
+    if (IRQ_TRACE && irq_trace_left > 0) {
+        LOG("RL11 IRQ %s val=%06o RLCS=%06o PC=%06o PS=%06o pending=%u",
+            event, (unsigned)value, (unsigned)RLCS,
+            (unsigned)kd11::curPC, (unsigned)kd11::PS,
+            (unsigned)irq_pending);
+        irq_trace_left--;
+    }
+}
 
 void reset()
 {
+    procNS::cancelinterrupt(INTRL);
+    irq_pending = 0;
+    irq_trace_left = 24;
     // Power-on default: control ready (bit 7) + drive ready (bit 0), no
     // errors. The bootrom polls bit 7 with TSTB / BPL .-2; some OS boot
     // loaders also check bit 0.
@@ -291,19 +321,39 @@ void write16(uint32_t a, uint16_t v)
 {
     switch (a) {
     case DEV_RL_CS:
+        trace_irq("CSR-write", v);
         // The M9312-style boot ROM in sam11/bootrom.h does NOT set the
         // explicit GO bit (bit 0); it writes the function code and then
         // polls control-ready. We follow that behavior: any RLCS write
         // launches the encoded function. We preserve the high error
         // bits unless execute() clears them.
+        procNS::cancelinterrupt(INTRL);
+        irq_pending = 0;
         RLCS = (RLCS & 0xFC00) | (v & 0x03FE);   // CS bits 13:0 writable
         RLCS &= ~0x0080;                          // busy
         execute();
+        if (RLCS & (1 << 6)) {
+            // Let the instruction following the CSR write execute before
+            // raising the completion interrupt. This is long enough for a
+            // guest WAIT to take effect, but short enough that an OS device
+            // probe cannot observe CRDY and rewrite RLCS first, cancelling
+            // an interrupt that real hardware would already have asserted.
+            irq_pending = IRQ_DELAY_TICKS;
+            trace_irq("scheduled", RLCS);
+        }
         break;
     case DEV_RL_BS:  RLBA  = v; break;
     case DEV_RL_DA:  RLDA  = v; break;
     case DEV_RL_MP:  RLMP  = v; break;
     case DEV_RL_BAE: RLBAE = v; break;
+    }
+}
+
+void tick()
+{
+    if (irq_pending && --irq_pending == 0 && (RLCS & (1 << 6))) {
+        trace_irq("request", INTRL);
+        procNS::interrupt(INTRL, 5);
     }
 }
 

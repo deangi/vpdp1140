@@ -243,6 +243,9 @@ static void sd_and_config_init() {
 // from "DL0" to "RK0".
 static void disks_mount() {
   if (!sd_ok) { LOGE("disks_mount: SD not available"); return; }
+  for (int s = 0; s < DRIVE_COUNT; s++)
+    disk_dismount(s);
+
   const bool rk_boot = (cfg.boot_kind == AppConfig::BK_RK);
   const String* paths[DRIVE_COUNT] = {
     rk_boot && cfg.disk_rk0.length() ? &cfg.disk_rk0 : &cfg.disk_a,
@@ -565,6 +568,17 @@ void loop() {
   bool btn_now = digitalRead(BUTTON_PIN);
   if (btn_prev && !btn_now && !ui_is_open()) ui_open_locked();
   btn_prev = btn_now;
+
+  // Boot-source or boot-media changed from the menu; remount and cold boot.
+  if (ui_consume_boot_change()) {
+    const char* boot_name = (cfg.boot_kind == AppConfig::BK_RK) ? "RK0" : "DL0";
+    LOG("ui: boot from %s", boot_name);
+    disks_mount();
+    cpu_set_boot_kind(cfg.boot_kind == AppConfig::BK_RK ? 1 : 0);
+    start_cpu(true);
+    boot_done = false;
+    led(0, 0, 32);
+  }
 
   // "Reboot PDP-11" from the menu (the menu has already closed itself).
   if (ui_consume_reboot()) {

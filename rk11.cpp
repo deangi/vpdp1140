@@ -42,6 +42,10 @@
 #include "disk.h"
 
 #include <Arduino.h>
+#ifdef PS
+#undef PS
+#endif
+#include "platform.h"
 
 #define procNS kd11
 
@@ -51,6 +55,7 @@ static const uint32_t SECS_PER_TRACK = 12;
 static const uint32_t SURFACES       = 2;
 static const uint32_t BYTES_PER_SEC  = 512;
 static const uint32_t MAX_CYLINDER   = 202;
+static const int      IRQ_DELAY_TICKS = 2;
 
 bool attached_drives[NUM_RK_DRIVES] = { false, false, false, false };
 
@@ -66,10 +71,23 @@ static uint16_t RKDA = 0;
 // synchronously from execute() - that delivers it BEFORE the guest's
 // WAIT executes (RT-11 issues `MOV cmd,RKCS; WAIT` and our cpu_run drains
 // the IRQ between those two instructions). Real disk hardware takes
-// milliseconds, so the WAIT runs first. We mimic that by counting down
-// a few hundred host instructions in rk11::tick() before raising INTRK.
+// milliseconds, so the WAIT runs first. We need only two emulated CPU
+// instructions of separation: one tick after the CSR write and one after
+// the following instruction (normally WAIT).
 static int      irq_pending  = 0;       // > 0 = ticks remaining
 static uint16_t irq_cs_snap  = 0;       // RKCS snapshot when op finished
+static constexpr bool IRQ_TRACE = false;
+static int      irq_trace_left = 24;
+
+static void trace_irq(const char *event, uint16_t value)
+{
+    if (IRQ_TRACE && irq_trace_left > 0) {
+        LOG("RK11 IRQ %s val=%06o RKCS=%06o PC=%06o PS=%06o pending=%d",
+            event, (unsigned)value, (unsigned)RKCS,
+            (unsigned)kd11::curPC, (unsigned)kd11::PS, irq_pending);
+        irq_trace_left--;
+    }
+}
 
 void reset()
 {
@@ -81,6 +99,9 @@ void reset()
     RKWC = 0;
     RKBA = 0;
     RKDA = 0;
+    irq_pending = 0;
+    irq_trace_left = 24;
+    procNS::cancelinterrupt(INTRK);
     for (int i = 0; i < NUM_RK_DRIVES; i++)
         attached_drives[i] = disk_is_mounted(i);
 }
@@ -246,16 +267,18 @@ static void execute()
     RKDS |= (1 << 7);
 
     // Fire the RK11 done-interrupt if Interrupt Enable (RKCS bit 6) is
-    // set, but DEFERRED: schedule it to land in ~256 host CPU steps via
-    // rk11::tick(). Synchronous firing from inside write16() raises the
+    // set, but DEFERRED: schedule it to land after the next guest
+    // instruction via rk11::tick(). Synchronous firing from inside write16() raises the
     // IRQ before the guest's WAIT instruction has executed, and our
     // cpu_run dispatcher drains the IRQ immediately, leaving the WAIT
     // hanging forever (the symptom: RT-11 monitor loads but never reaches
     // its sign-on print). Real RK05 hardware takes ms to complete; we
-    // approximate with a few hundred instruction-counts.
+    // preserve the required ordering without leaving a long cancellation
+    // window during OS device probes.
     if (RKCS & (1 << 6)) {
-        irq_pending = 256;
+        irq_pending = IRQ_DELAY_TICKS;
         irq_cs_snap = RKCS;
+        trace_irq("scheduled", irq_cs_snap);
     }
 }
 
@@ -266,6 +289,7 @@ void tick()
             // Only raise INTRK if IE is still set when the timer expires;
             // RT-11 might have cleared it between issue and now.
             if (RKCS & (1 << 6)) {
+                trace_irq("request", INTRK);
                 procNS::interrupt(INTRK, 5);
             }
         }
@@ -294,6 +318,7 @@ void write16(uint32_t a, uint16_t v)
     case DEV_RK_ER:  break;   // read-only
 
     case DEV_RK_CS:
+        trace_irq("CSR-write", v);
         // Preserve high error bits (15:12); software writes the low 12.
         // Bit 7 (CRDY) is set by hardware on op completion, so writing
         // it clears the "ready" state until we re-assert it inside

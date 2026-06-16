@@ -65,8 +65,8 @@ struct AppConfig {
   bool   v4b_quirks = true;
 
   // KW11-P programmable real-time clock. When true the kwp.cpp device
-  // is fully active (CSR/CSB/CNTR live, ticks count down at the
-  // configured rate, raises INTRTC at BR5 on underflow). RSTS V7
+  // is fully active (CSR/CSB/CNTR live, four clock rates, up/down and
+  // repeat modes, raises INTRTC at BR6 on expiry). RSTS V7
   // INIT.SYS's hardware test wants this so it stops printing
   // "KW11-P doesn't work."; however when RSTS V4B's INIT detects a
   // working KW11-P it programs it for interrupt-driven scheduling

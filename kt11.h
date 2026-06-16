@@ -42,6 +42,9 @@ extern uint16_t SR1;
 extern uint16_t SR2;
 extern uint16_t SR3;
 
+void begin_instruction(uint16_t pc);
+void record_reg_change(uint8_t reg, int8_t delta);
+void write_sr0(uint16_t v);
 uint32_t decode_instr(uint16_t a, bool w, uint8_t user);
 uint32_t decode_data(uint16_t a, bool w, uint8_t user);
 uint16_t read16(uint32_t a);

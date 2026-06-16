@@ -38,8 +38,8 @@ everything else.
 
 V6 Unix and XXDP+ both work end-to-end (keyboard input, disk read/write,
 console output on all three channels). RT-11 V5 and RSTS/E hit code
-paths that touch features sam11 doesn't fully emulate (KW11-P
-programmable clock at `0o172540`, FP11 floating point, 22-bit MMU). This
+paths that touch features sam11 doesn't fully emulate (FP11 floating
+point and the 22-bit MMU). This
 is the same status sam11's upstream README documents: V6 is the
 validated path; "some other OSes boot, but crash out for various
 reasons."
@@ -56,11 +56,12 @@ reasons."
 |-----------------|-------------------------------------------------------------------|
 | CPU             | KD11 (PDP-11/40), full ISA + EIS, no FP11 / FIS                   |
 | Memory          | 248 KiB physical, 18-bit address bus, allocated from PSRAM        |
-| MMU             | KT11 (kernel + user address spaces)                               |
+| MMU             | KT11-D, 18-bit kernel/user mapping with MMR0/MMR1/MMR2 restart state |
 | Console         | KL11 UART at `0o177560` (vector 060), bridged to TFT+Telnet+USB    |
 | RK05 disk       | RK11 controller at `0o177400` (vector 220), up to 4 drives        |
 | RL01/02 disk    | RL11 controller at `0o174400` (vector 160), up to 4 drives        |
 | Line clock      | KW11-L at `0o177546` (vector 100), tickrate ~60 Hz                |
+| Programmable clock | KW11-P at `0o172540` (vector 104, BR6), four rates, repeat/one-shot |
 | Boot ROM        | DEC M9312-style RK0 / RL0 stubs (selected by `boot=` in config)   |
 
 The status bar below the 80×25 console shows drive activity, WiFi IP,

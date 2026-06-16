@@ -83,16 +83,21 @@ void write16(uint32_t a, uint16_t v)
     case DEV_LP_STATUS:
         if (v & (1 << 6))
         {
+            bool was_off = (LPS & (1 << 6)) == 0;
             LPS |= (1 << 6);
+            if (was_off && (LPS & 0200))
+                procNS::interrupt(INTLP, 4);
         }
         else
         {
             LPS &= ~(1 << 6);
+            procNS::cancelinterrupt(INTLP);
         }
         break;
     case DEV_LP_DATA:
         LPB = v & 0177;
         LPS &= 0177577;
+        procNS::cancelinterrupt(INTLP);
         loop_time = 0;
         break;
     default:
@@ -128,8 +133,10 @@ uint16_t read16(uint32_t a)
 
 void reset()
 {
+    procNS::cancelinterrupt(INTLP);
     LPS = 0200;
     LPB = 0;
+    loop_time = 0;
 }
 };  // namespace lp11
 
