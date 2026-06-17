@@ -59,7 +59,7 @@ Still testing other operating systems.   I think 211 BSD isn't going to work on 
 | Console         | KL11 UART at `0o177560` (vector 060), bridged to TFT+Telnet+USB    |
 | RK05 disk       | RK11 controller at `0o177400` (vector 220), up to 4 drives        |
 | RL01/02 disk    | RL11 controller at `0o174400` (vector 160), up to 4 drives        |
-| RP04/05/06 disk | RH11 controller at `0o176700` (vector 254), RP0 as secondary disk |
+| RP04/05/06 disk | RH11 controller at `0o176700` (vector 254), RP0 as secondary disk; testing mode, not yet verified |
 | Line clock      | KW11-L at `0o177546` (vector 100), tickrate ~60 Hz                |
 | Programmable clock | KW11-P at `0o172540` (vector 104, BR6), four rates, repeat/one-shot |
 | Boot ROM        | DEC M9312-style RK0 / RL0 stubs (selected by `boot=` in config)   |
@@ -190,8 +190,9 @@ mapping is not currently supported.
 
 `rp0` mounts one optional RP-family image through an RH11/RP register set at
 `0o176700`. Set `rp0_type` to `rp04`, `rp05`, or `rp06` so the controller
-reports matching geometry. RP0 is secondary storage only in this build; the
-boot menu and M9312-style boot ROM still boot from RK0 or RL0.
+reports matching geometry. RP0 support is in testing mode and has not been
+verified yet. RP0 is secondary storage only in this build; the boot menu and
+M9312-style boot ROM still boot from RK0 or RL0.
 
 ## Using it
 

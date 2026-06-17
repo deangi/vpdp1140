@@ -26,7 +26,7 @@ USB serial, and Telnet at the same time.
 | Console | KL11 console at `0177560`, vector `060` |
 | RK disk | RK11 controller for RK05 images |
 | RL disk | RL11 controller, up to two normal RL drives in common configurations, with four host slots available as `DL0`..`DL3` |
-| RP disk | Optional secondary RH11/RP04-RP06 disk as `RP0`; not currently bootable |
+| RP disk | Optional secondary RH11/RP04-RP06 disk as `RP0`; testing mode, not verified yet, and not currently bootable |
 | Clocks | KW11-L line clock and optional KW11-P programmable clock |
 | Boot ROM | M9312-style boot stubs for RK0 and RL0 |
 
@@ -273,8 +273,8 @@ thinking in UNIX V6 naming.
 When `boot = rk0`, the RK image replaces host slot 0 so the RK11 controller sees
 it as RK drive 0. When booting RL, slots map to `DL0` through `DL3`.
 
-`rp0` is secondary storage in this build. The boot ROM and menu boot choices are
-for RK0 and RL0.
+`rp0` is secondary storage in this build. RP0 support is in testing mode and has
+not been verified yet. The boot ROM and menu boot choices are for RK0 and RL0.
 
 ## Disk Images
 
