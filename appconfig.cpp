@@ -206,6 +206,8 @@ void config_apply_compiled_defaults(AppConfig& cfg) {
   cfg.disk_c        = DEFAULT_DL2_IMG;
   cfg.disk_d        = DEFAULT_DL3_IMG;
   cfg.disk_rk0      = "";
+  cfg.disk_rp0      = "";
+  cfg.disk_rp0_type = "rp06";
   cfg.boot_drive    = 'a';
   cfg.boot_kind     = AppConfig::BK_RL;
 }
@@ -268,11 +270,14 @@ static void parse_line(AppConfig& cfg, String& section, const String& raw,
     // still index by char 'a'..'d' to keep the slot-array indexing in
     // vpdp1140.ino simple. rk0 is a separate logical key that, when boot=rk0,
     // gets mounted at slot 0 in place of dl0 so the RK11 controller can find it.
+    // rp0 is a secondary RH11/RP disk and does not affect boot media.
     if      (key == "dl0")      cfg.disk_a = val;
     else if (key == "dl1")      cfg.disk_b = val;
     else if (key == "dl2")      cfg.disk_c = val;
     else if (key == "dl3")      cfg.disk_d = val;
     else if (key == "rk0")      cfg.disk_rk0 = val;
+    else if (key == "rp0")      cfg.disk_rp0 = val;
+    else if (key == "rp0_type") cfg.disk_rp0_type = to_lower(val);
     else if (key == "boot") {
       String v = to_lower(val);
       cfg.boot_kind = AppConfig::BK_RL;
@@ -359,6 +364,8 @@ bool config_load_pdp(AppConfig& cfg) {
   cfg.disk_c = "";
   cfg.disk_d = "";
   cfg.disk_rk0 = "";
+  cfg.disk_rp0 = "";
+  cfg.disk_rp0_type = "rp06";
   cfg.boot_input_len = 0;
 
   bool existed = parse_config_file(cfg, PDP_CFG_PATH, CONFIG_EMULATOR);
@@ -461,6 +468,8 @@ bool config_write_default_pdp(const AppConfig& cfg) {
   f.println("[disks]");
   f.println("; dl0..dl3 = RL11 units (RL01/RL02 disk packs).");
   f.println("; rk0      = RK05 2.5 MB disk pack (e.g. RT-11).");
+  f.println("; rp0      = optional secondary RH11/RP disk pack.");
+  f.println("; rp0_type = rp04, rp05, or rp06. Default rp06.");
   f.println("; When boot=rk0 (or dk0, the Unix V6 name) the rk0 image takes");
   f.println("; slot 0 in place of dl0 so the RK11 controller sees it as drive 0.");
   f.println("; Leave a slot blank to dismount it at boot.");
@@ -469,6 +478,8 @@ bool config_write_default_pdp(const AppConfig& cfg) {
   f.printf("dl2  = %s\r\n", cfg.disk_c.c_str());
   f.printf("dl3  = %s\r\n", cfg.disk_d.c_str());
   f.printf("rk0  = %s\r\n", cfg.disk_rk0.c_str());
+  f.printf("rp0  = %s\r\n", cfg.disk_rp0.c_str());
+  f.printf("rp0_type = %s\r\n", cfg.disk_rp0_type.c_str());
   // Friendly boot value: dl0/dl1/dl2/dl3/rk0
   const char* boot_name;
   if (cfg.boot_kind == AppConfig::BK_RK) boot_name = "rk0";
@@ -626,7 +637,8 @@ void config_print(const AppConfig& cfg) {
       cfg.disk_a.c_str(), cfg.disk_b.c_str());
   LOG("          dl2=\"%s\"  dl3=\"%s\"",
       cfg.disk_c.c_str(), cfg.disk_d.c_str());
-  LOG("          rk0=\"%s\"  boot=%s",
-      cfg.disk_rk0.c_str(), boot_name);
+  LOG("          rk0=\"%s\"  rp0=\"%s\" (%s)  boot=%s",
+      cfg.disk_rk0.c_str(), cfg.disk_rp0.c_str(),
+      cfg.disk_rp0_type.c_str(), boot_name);
   LOG("--------------------------------------");
 }

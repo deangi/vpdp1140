@@ -1,13 +1,15 @@
 #pragma once
 #include <stdint.h>
 
-// Four guest media slots. Legacy A..D identifiers map to RL11 units DL0..DL3.
+// Guest media slots. Legacy A..D identifiers map to RL11 units DL0..DL3.
+// RP0 is a secondary RH11/RP disk and is not part of the boot-drive set.
 enum {
   DRIVE_A = 0,   // DL0
   DRIVE_B = 1,   // DL1
   DRIVE_C = 2,   // DL2
   DRIVE_D = 3,   // DL3
-  DRIVE_COUNT = 4
+  DRIVE_RP0 = 4, // RP0
+  DRIVE_COUNT = 5
 };
 
 // Mount an image file (path on the SD card) into a drive slot.

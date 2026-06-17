@@ -5,6 +5,11 @@ PDP-11/40 that boots **V6 Unix** from an SD-card disk image. The console
 appears on the onboard TFT, on Telnet, and on USB-Serial — all three live
 simultaneously.  Also boots RT-11, and an early version of RSTS.
 
+For full operating instructions, SD card setup, configuration-file reference,
+and menu documentation, see the [PDP 11/40 Emulator User Guide](docs/user-manual.md).
+
+![vpdp1140 running RT-11 V5](docs/images/rt11-running.jpeg)
+
 ```
             +------------------------------+
             |  RT-11SJ V05.07              |
@@ -31,22 +36,16 @@ everything else.
 
 | Guest OS              | Disk image          | Result                            |
 |-----------------------|---------------------|-----------------------------------|
-| **V6 Unix**           | `unixv6.dsk` (RK05) | ✅ Boots to `@`, then `#` shell    |
+| **V6 Unix**           | `unixv6.dsk` (RK05) | ✅ Boots to `@`, then `#` shell   |
 | **XXDP+ diagnostics** | `xxdp25.dsk` (RL02) | ✅ Boots to XXDP-SM `.` monitor    |
-| RT-11 SJ V5           | `rt11v5.dsk` (RK05) | ⚠️ Loads then stalls in init      |
-| RSTS/E V7             | `rsts_full_rl.dsk`  | ⚠️ Loads several sectors then HALTs |
+| RT-11 SJ V5           | `rt11v5.dsk` (RK05) | ✅ Boots to . prompt, runs DIR   |
+| RSTS V4B              | `RSTS11v4B.dsk`     |✅ Boots to READY prompt          |
 
-V6 Unix and XXDP+ both work end-to-end (keyboard input, disk read/write,
-console output on all three channels). RT-11 V5 and RSTS/E hit code
-paths that touch features sam11 doesn't fully emulate (FP11 floating
-point and the 22-bit MMU). This
-is the same status sam11's upstream README documents: V6 is the
-validated path; "some other OSes boot, but crash out for various
-reasons."
+Still testing other operating systems.   I think 211 BSD isn't going to work on the PDP-11/40
 
 ## Hardware
 
-- **Freenove ESP32-S3 WROVER 2.8" Display** board (FNK0104B): ILI9341
+- **Freenove ESP32-S3  2.8" Display** board (FNK0104B): ILI9341
   TFT, FT6336U capacitive touch, micro-SD slot, 8 MB Octal PSRAM,
   16 MB flash.
 
@@ -60,6 +59,7 @@ reasons."
 | Console         | KL11 UART at `0o177560` (vector 060), bridged to TFT+Telnet+USB    |
 | RK05 disk       | RK11 controller at `0o177400` (vector 220), up to 4 drives        |
 | RL01/02 disk    | RL11 controller at `0o174400` (vector 160), up to 4 drives        |
+| RP04/05/06 disk | RH11 controller at `0o176700` (vector 254), RP0 as secondary disk |
 | Line clock      | KW11-L at `0o177546` (vector 100), tickrate ~60 Hz                |
 | Programmable clock | KW11-P at `0o172540` (vector 104, BR6), four rates, repeat/one-shot |
 | Boot ROM        | DEC M9312-style RK0 / RL0 stubs (selected by `boot=` in config)   |
@@ -155,12 +155,16 @@ kwp_enabled = false           ; true for RSTS V7 bring-up
 [disks]
 ; dl0..dl3 = RL01/RL02 packs (RL11 controller)
 ; rk0      = RK05 pack       (RK11 controller)
+; rp0      = optional RP04/RP05/RP06 pack (RH11 controller)
+; rp0_type = rp04, rp05, or rp06
 ; When boot=rk0 the rk0 image takes slot 0 in place of dl0.
 dl0  = /xxdp25.dsk
 dl1  =
 dl2  =
 dl3  =
 rk0  = /unixv6.dsk
+rp0  =
+rp0_type = rp06
 boot = rk0                    ; or dl0, dl1, dl2, dl3
 ```
 
@@ -181,6 +185,13 @@ some slots permanently to RL11 and others to RK11, and it does not validate
 an image's controller type. Mount RL images when using an RL boot and use the
 configured `rk0` image when using an RK boot. Simultaneous mixed RL/RK drive
 mapping is not currently supported.
+
+### RP secondary disk
+
+`rp0` mounts one optional RP-family image through an RH11/RP register set at
+`0o176700`. Set `rp0_type` to `rp04`, `rp05`, or `rp06` so the controller
+reports matching geometry. RP0 is secondary storage only in this build; the
+boot menu and M9312-style boot ROM still boot from RK0 or RL0.
 
 ## Using it
 
@@ -224,6 +235,7 @@ mapping is not currently supported.
 | `kl11.cpp` / `.h`             | KL11 console — rewired to TFT+Telnet+USB           |
 | `rk11.cpp` / `.h`             | RK11 controller — rewired to `disk.cpp`             |
 | `rl11.cpp` / `.h`             | RL11 controller (fresh implementation; not sam11's) |
+| `rh11.cpp` / `.h`             | RH11/RP04-RP06 secondary disk controller            |
 | `kw11.cpp` / `.h`             | KW11-L line clock                                   |
 | `cpu/cpu_*.cpp.h`             | Instruction implementations                         |
 | `pdp1140.h`                   | Device addresses, trap vectors, build feature flags |

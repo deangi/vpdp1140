@@ -108,7 +108,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  * RF11         RS Disk Controller (RS11)
  * RL11     +   RL Disk Controller (RL02)               RL
  * RP11     *+  RP Disk Pack Controller (RP03, RP02)    RP
- * RH11     +   RS,RP,RM Disk Pack Controller (RP06)    HP
+ * RH11     +   MASSBUS Disk Pack Controller (RP04/5/6) HP
  * RC11         RS Disk Controller  (RS64)
  * PC11     +   PC Punch Tape Controller (PC05)         PC
  * TC11         TU DECtape Controller (TU56)
@@ -155,7 +155,7 @@ namespace pdp11 {
 
 #define USE_LP true   // enable the line printer
 #define USE_PC true   // WIP - enable the punch card/tape read/write
-#define USE_RP false  // WIP - enable RH11 and RP11 disk drives (e.g. RP06)
+#define USE_RP true   // RH11/RP secondary disk support
 #define USE_RL true   // RL11 is integrated into DD11 and reset with the CPU
 #define USE_TM false  // WIP - enable TM11 mag tape drives (e.g. TU10)
 

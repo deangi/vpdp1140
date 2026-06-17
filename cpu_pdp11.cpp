@@ -25,6 +25,7 @@
 #include "kwp.h"
 #include "rk11.h"
 #include "rl11.h"
+#include "rh11.h"
 #include "lp11.h"
 #include "ky11.h"
 #include "dd11.h"
@@ -215,6 +216,7 @@ void cpu_reset() {
   kd11::reset();
   rl11::reset();
   rk11::reset();
+  rh11::reset();
   lp11::reset();
   kwp::reset();
 
@@ -357,7 +359,7 @@ uint32_t cpu_run(uint32_t max_cycles) {
     // level makes a BR4 KL11 appear to software as a higher-priority device.
     if (itab[0].vec && (itab[0].pri > ((kd11::PS >> 5) & 7))) {
       if (DISK_IRQ_TRACE && s_disk_irq_trace_left > 0 &&
-          (itab[0].vec == INTRK || itab[0].vec == INTRL)) {
+          (itab[0].vec == INTRK || itab[0].vec == INTRL || itab[0].vec == INTRP)) {
         LOG("CPU IRQ deliver vec=%03o BR%u PC=%06o PS=%06o",
             (unsigned)itab[0].vec, (unsigned)itab[0].pri,
             (unsigned)kd11::R[7], (unsigned)kd11::PS);
@@ -380,6 +382,7 @@ uint32_t cpu_run(uint32_t max_cycles) {
     kwp::tick();    // KW11-P programmable clock countdown
     rk11::tick();   // drives the deferred RK-done IRQ countdown
     rl11::tick();   // drives the deferred RL-done IRQ countdown
+    rh11::tick();   // drives the deferred RH/RP-done IRQ countdown
     lp11::poll();
     kl11::poll();
     executed++;

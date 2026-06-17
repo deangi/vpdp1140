@@ -247,25 +247,31 @@ static void disks_mount() {
     disk_dismount(s);
 
   const bool rk_boot = (cfg.boot_kind == AppConfig::BK_RK);
-  const String* paths[DRIVE_COUNT] = {
+  const String* paths[4] = {
     rk_boot && cfg.disk_rk0.length() ? &cfg.disk_rk0 : &cfg.disk_a,
     &cfg.disk_b, &cfg.disk_c, &cfg.disk_d
   };
-  const char* unit_names[DRIVE_COUNT] = {
+  const char* unit_names[4] = {
     rk_boot ? "RK0" : "DL0", "DL1", "DL2", "DL3"
   };
-  for (int s = 0; s < DRIVE_COUNT; s++) {
+  for (int s = 0; s < 4; s++) {
     if (paths[s]->length() == 0) continue;
     bool ok = disk_mount(s, paths[s]->c_str());
     LOG("disks_mount %s: \"%s\" -> %s",
         unit_names[s], paths[s]->c_str(), ok ? "mounted" : "FAILED");
+  }
+  if (cfg.disk_rp0.length()) {
+    bool ok = disk_mount(DRIVE_RP0, cfg.disk_rp0.c_str());
+    LOG("disks_mount RP0 (%s): \"%s\" -> %s",
+        cfg.disk_rp0_type.c_str(), cfg.disk_rp0.c_str(),
+        ok ? "mounted" : "FAILED");
   }
 }
 
 // Status bar drawn in the 40 px strip below the 80x25 console: drive activity
 // indicators, IP address, telnet state and emulation speed.
 static void draw_status_bar() {
-  static uint32_t prev_io[DRIVE_COUNT] = {0, 0, 0, 0};
+  static uint32_t prev_io[DRIVE_COUNT] = {0};
   static uint32_t prev_inst = 0;
   static uint32_t prev_ms   = 0;
   const int sy = CON_ROWS * CELL_H;          // 200
@@ -274,11 +280,11 @@ static void draw_status_bar() {
 
   // Drive indicators DL0..DL3 (or RK0/DL1/DL2/DL3 when booting RK05) -
   // green=mounted, yellow=active, dim=empty.
-  const char* unit_labels[DRIVE_COUNT] = {
+  const char* unit_labels[4] = {
     (cfg.boot_kind == AppConfig::BK_RK) ? "RK0" : "DL0",
     "DL1", "DL2", "DL3"
   };
-  for (int s = 0; s < DRIVE_COUNT; s++) {
+  for (int s = 0; s < 4; s++) {
     uint32_t r = 0, w = 0;
     disk_stats(s, &r, &w);
     bool active = (r + w) != prev_io[s];

@@ -66,5 +66,13 @@
 #define RL02_WORDS_PER_SEC 256
 #define RL02_BYTES_PER_SEC (RL02_WORDS_PER_SEC * 2)   // 512 bytes/sector
 
+// RP04/RP05/RP06 via RH11. All use 19 heads, 22 sectors/track, 512 bytes/sector.
+#define RP_HEADS       19
+#define RP_SECTORS     22
+#define RP_BYTES_PER_SEC 512
+#define RP04_CYL       411
+#define RP05_CYL       411
+#define RP06_CYL       815
+
 // ---- Boot tuning ----
 #define WIFI_CONNECT_TIMEOUT_MS  20000

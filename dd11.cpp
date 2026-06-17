@@ -45,6 +45,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "ms11.h"
 #include "rk11.h"
 #include "rl11.h"
+#include "rh11.h"
 #include "sam11.h"
 #include "xmem.h"
 #include "platform.h"  // for LOG, g_serial_silenced
@@ -330,6 +331,31 @@ void write16(uint32_t a, uint16_t v)
         rl11::write16(a, v);
         return;
 
+    case DEV_RH_CS1:
+    case DEV_RH_WC:
+    case DEV_RH_BA:
+    case DEV_RH_DA:
+    case DEV_RH_CS2:
+    case DEV_RH_DS:
+    case DEV_RH_ER1:
+    case DEV_RH_AS:
+    case DEV_RH_LA:
+    case DEV_RH_DB:
+    case DEV_RH_MR:
+    case DEV_RH_DT:
+    case DEV_RH_SN:
+    case DEV_RH_OF:
+    case DEV_RH_DC:
+    case DEV_RH_CC:
+    case DEV_RH_ER2:
+    case DEV_RH_ER3:
+    case DEV_RH_EC1:
+    case DEV_RH_EC2:
+    case DEV_RH_BAE:
+    case DEV_RH_CS3:
+        rh11::write16(a, v);
+        return;
+
     case DEV_CONSOLE_TTY_OUT_DATA:
     case DEV_CONSOLE_TTY_OUT_STATUS:
     case DEV_CONSOLE_TTY_IN_DATA:
@@ -532,6 +558,31 @@ uint16_t read16(uint32_t a)
     case DEV_RL_MP:
     case DEV_RL_BAE:
         readReturn rl11::read16(a);
+        break;
+
+    case DEV_RH_CS1:
+    case DEV_RH_WC:
+    case DEV_RH_BA:
+    case DEV_RH_DA:
+    case DEV_RH_CS2:
+    case DEV_RH_DS:
+    case DEV_RH_ER1:
+    case DEV_RH_AS:
+    case DEV_RH_LA:
+    case DEV_RH_DB:
+    case DEV_RH_MR:
+    case DEV_RH_DT:
+    case DEV_RH_SN:
+    case DEV_RH_OF:
+    case DEV_RH_DC:
+    case DEV_RH_CC:
+    case DEV_RH_ER2:
+    case DEV_RH_ER3:
+    case DEV_RH_EC1:
+    case DEV_RH_EC2:
+    case DEV_RH_BAE:
+    case DEV_RH_CS3:
+        readReturn rh11::read16(a);
         break;
 
     case DEV_CONSOLE_TTY_OUT_DATA:
