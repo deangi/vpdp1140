@@ -329,6 +329,11 @@ boot_input = "unix\r"
 
 ## Network Services
 
+The bottom status area shows the WiFi address plus the Telnet and FTP status
+pills while the emulator is running.
+
+![RT-11 running with WiFi, Telnet, and FTP status shown along the bottom](images/rt11-running.jpeg)
+
 ### WiFi Status
 
 The status line shows the assigned IP address when connected, or a disconnected
