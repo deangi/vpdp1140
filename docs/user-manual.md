@@ -365,6 +365,9 @@ ftp <board-ip> 21
 
 Use the username and password from `[ftp]` in `/wificonfig.ini`.
 
+This is plain FTP, not SFTP. It has been tested with Windows FTP, Linux FTP,
+and FileZilla.
+
 The FTP status pill uses the same color convention as Telnet: dim/off when not
 listening, green when listening, yellow when connected.
 
