@@ -2,8 +2,8 @@
 
 // ---- App metadata ----
 #define APP_TITLE       "vpdp1140"
-#define APP_VERSION     "V1.3"
-#define APP_BUILD_DATE  "2026-06-16"
+#define APP_VERSION     "V1.4"
+#define APP_BUILD_DATE  "2026-06-19"
 
 // ---- RGB LED (WS2812) ----
 #define LED_PIN         42

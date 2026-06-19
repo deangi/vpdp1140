@@ -30,15 +30,20 @@ static const char* slot_name(int s) {
   return "?";
 }
 
-bool disk_mount(int slot, const char* path) {
+bool disk_mount_mode(int slot, const char* path, bool force_readonly) {
   SD_FTP_StorageGuard guard;
   if (!slot_valid(slot) || !path || !*path) return false;
+  if (strlen(path) >= sizeof(g_drv[slot].path)) {
+    LOGE("disk_mount[%d]: path too long", slot);
+    return false;
+  }
 
-  disk_dismount(slot);   // ensure clean slot
-
-  // Prefer read-write; fall back to read-only if the image is write-protected.
-  bool readonly = false;
-  File f = SD_MMC.open(path, "r+");
+  // Open and validate the replacement before disturbing the current image.
+  // Runtime EMU commands therefore leave the existing disk attached if the
+  // requested file is missing or invalid.
+  bool readonly = force_readonly;
+  File f;
+  if (!force_readonly) f = SD_MMC.open(path, "r+");
   if (!f) {
     f = SD_MMC.open(path, "r");
     if (!f) {
@@ -62,6 +67,11 @@ bool disk_mount(int slot, const char* path) {
     f.close();
     return false;
   }
+
+  if (g_drv[slot].mounted) {
+    g_drv[slot].file.flush();
+    g_drv[slot].file.close();
+  }
   g_drv[slot].file     = f;
   g_drv[slot].mounted  = true;
   g_drv[slot].changed  = true;
@@ -77,16 +87,75 @@ bool disk_mount(int slot, const char* path) {
   return true;
 }
 
+bool disk_mount(int slot, const char* path) {
+  return disk_mount_mode(slot, path, false);
+}
+
 void disk_dismount(int slot) {
   SD_FTP_StorageGuard guard;
   if (!slot_valid(slot)) return;
   if (g_drv[slot].mounted) {
+    g_drv[slot].file.flush();
     g_drv[slot].file.close();
     LOG("disk_dismount[%s]: %s", slot_name(slot), g_drv[slot].path);
   }
   g_drv[slot].mounted = false;
+  g_drv[slot].changed = true;
+  g_drv[slot].readonly = false;
   g_drv[slot].size = 0;
   g_drv[slot].path[0] = 0;
+}
+
+void disk_flush_all() {
+  SD_FTP_StorageGuard guard;
+  for (int slot = 0; slot < DRIVE_COUNT; slot++)
+    if (g_drv[slot].mounted && !g_drv[slot].readonly)
+      g_drv[slot].file.flush();
+}
+
+bool disk_reopen_all() {
+  struct ReopenInfo {
+    bool mounted;
+    bool readonly;
+    char path[64];
+  };
+  ReopenInfo saved[DRIVE_COUNT] = {};
+
+  {
+    SD_FTP_StorageGuard guard;
+    for (int slot = 0; slot < DRIVE_COUNT; slot++) {
+      saved[slot].mounted = g_drv[slot].mounted;
+      saved[slot].readonly = g_drv[slot].readonly;
+      strncpy(saved[slot].path, g_drv[slot].path,
+              sizeof(saved[slot].path) - 1);
+      saved[slot].path[sizeof(saved[slot].path) - 1] = 0;
+
+      if (g_drv[slot].mounted) {
+        if (!g_drv[slot].readonly) g_drv[slot].file.flush();
+        g_drv[slot].file.close();
+      }
+      g_drv[slot].mounted = false;
+      g_drv[slot].readonly = false;
+      g_drv[slot].size = 0;
+      g_drv[slot].path[0] = 0;
+    }
+  }
+
+  // Give the SDMMC/VFS layer a scheduling point after closing the old handles
+  // before opening replacements. This is outside the storage lock so FTP is
+  // not blocked during the delay.
+  delay(2);
+
+  bool all_ok = true;
+  for (int slot = 0; slot < DRIVE_COUNT; slot++) {
+    if (!saved[slot].mounted) continue;
+    if (!disk_mount_mode(slot, saved[slot].path, saved[slot].readonly)) {
+      LOGE("disk_reopen_all[%s]: failed to reopen %s",
+           slot_name(slot), saved[slot].path);
+      all_ok = false;
+    }
+  }
+  return all_ok;
 }
 
 bool disk_is_mounted(int slot) {

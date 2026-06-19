@@ -23,6 +23,7 @@
 #include "kl11.h"
 #include "kw11.h"
 #include "kwp.h"
+#include "dl11_file.h"
 #include "rk11.h"
 #include "rl11.h"
 #include "rh11.h"
@@ -219,6 +220,7 @@ void cpu_reset() {
   rh11::reset();
   lp11::reset();
   kwp::reset();
+  dl11_file::reset();
 
   // Install the chosen boot ROM at BOOT_START (02000 octal). kd11::reset()
   // installs bootrom_rk0 by default; we overwrite that region with either
@@ -380,6 +382,7 @@ uint32_t cpu_run(uint32_t max_cycles) {
     kd11::step();
     kw11::tick();
     kwp::tick();    // KW11-P programmable clock countdown
+    dl11_file::poll();
     rk11::tick();   // drives the deferred RK-done IRQ countdown
     rl11::tick();   // drives the deferred RL-done IRQ countdown
     rh11::tick();   // drives the deferred RH/RP-done IRQ countdown

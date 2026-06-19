@@ -23,6 +23,11 @@ struct AppConfig {
   uint8_t boot_input[BOOT_INPUT_MAX];
   size_t  boot_input_len = 0;
 
+  // [serial1]
+  // Enables a second DL11-compatible TTY at 0176500. Its input and output
+  // files are connected at runtime through TTY0 VPDP control commands.
+  bool serial1_enabled = false;
+
   // [ftp]
   // FTP server exposing the SD card root. Control channel uses ftp_port;
   // passive data uses ftp_port+1.
@@ -55,7 +60,8 @@ struct AppConfig {
   // [compat]
   // V4B (RSTS/E V4B) requires its probe-by-write of two non-emulated
   // device ranges to be silently absorbed in dd11 (KE11-A EAE at
-  // 0o772100..0o772176 and the second DL11 / TT1 at 0o776500..0o776516).
+  // 0o772100..0o772176 and, when serial1 is disabled, the second DL11 /
+  // TT1 at 0o776500..0o776516).
   // Without absorbs, V4B's bus-error handler unconditionally HALTs.
   // RSTS V7 is the opposite case: with the TT1 absorb V7's INIT.SYS
   // sees a phantom DL11, allocates a floating vector for it, and later

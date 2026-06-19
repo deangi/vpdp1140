@@ -57,6 +57,8 @@
 #include "ftp.h"
 #include "touch.h"
 #include "ui.h"
+#include "dl11_file.h"
+#include "emu_control.h"
 
 static TFT_eSPI tft;
 static Freenove_ESP32_WS2812 strip(LED_COUNT, LED_PIN, LED_CHANNEL, TYPE_GRB);
@@ -211,6 +213,8 @@ static void sd_and_config_init() {
     tft_status(ROW_CFG, "Cfg:   ", msg, col);
   }
   config_print(cfg);
+  dl11_file::set_enabled(cfg.serial1_enabled);
+  emu_control::init();
 
   // Push the V4B-quirks flag down to dd11 so its probe-absorb ranges
   // honor what pdpconfig.ini said. Must happen before cpu_reset() / any
@@ -575,6 +579,22 @@ void loop() {
   if (btn_prev && !btn_now && !ui_is_open()) ui_open_locked();
   btn_prev = btn_now;
 
+  // Execute deferred VPDP control commands outside the CPU instruction path.
+  // This is where SD file operations, runtime media changes, and TT1 file I/O
+  // are allowed to block briefly without stalling an emulated UART register.
+  emu_control::poll();
+  if (emu_control::consume_reboot_request()) {
+    LOG("EMU command: reboot PDP-11");
+    dl11_file::disconnect_all();
+    if (disk_reopen_all()) {
+      start_cpu(true);
+      boot_done = false;
+      led(0, 0, 32);
+    } else {
+      LOGE("EMU reboot cancelled: one or more disk images could not be reopened");
+    }
+  }
+
   // Boot-source or boot-media changed from the menu; remount and cold boot.
   if (ui_consume_boot_change()) {
     const char* boot_name = (cfg.boot_kind == AppConfig::BK_RK) ? "RK0" : "DL0";
@@ -589,9 +609,13 @@ void loop() {
   // "Reboot PDP-11" from the menu (the menu has already closed itself).
   if (ui_consume_reboot()) {
     LOG("ui: reboot PDP-11");
-    start_cpu(true);
-    boot_done = false;
-    led(0, 0, 32);
+    if (disk_reopen_all()) {
+      start_cpu(true);
+      boot_done = false;
+      led(0, 0, 32);
+    } else {
+      LOGE("ui: reboot cancelled: one or more disk images could not be reopened");
+    }
   }
 
   // "Reset ESP32" from the menu. NO serial activity on this path - if the
@@ -606,6 +630,7 @@ void loop() {
 
   // While the menu is open the PDP-11 is paused, but FTP remains available.
   if (ui_is_open()) {
+    emu_control::poll();
     ftp_poll();
     delay(8);
     return;
@@ -624,11 +649,13 @@ void loop() {
     while (Serial.available())
       console_key_push((uint8_t)Serial.read());   // -> Serial-in FIFO
     ftp_poll();                  // accept + FTP commands/data against SD root
+    emu_control::poll();
     cpu_run(8000);
     console_drain_tft();         // TFT-out FIFO -> ANSI parser -> cell grid
     kl11::drain_serial_out();    // Serial-out FIFO -> Serial.write
   }
   ftp_poll();
+  emu_control::poll();
   console_drain_tft();
   kl11::drain_serial_out();
 

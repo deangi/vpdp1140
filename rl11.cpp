@@ -103,6 +103,14 @@ void reset()
     for (int i = 0; i < 4; i++) attached[i] = disk_is_mounted(i);
 }
 
+void media_changed(int unit, bool mounted)
+{
+    if (unit < 0 || unit >= 4) return;
+    attached[unit] = mounted;
+    if (!mounted && (((RLCS >> 8) & 3) == unit))
+        RLCS &= ~0x0001;
+}
+
 // Compute the byte offset into the disk image for RLDA's current
 // cylinder/surface/sector triple.
 static uint32_t da_to_offset(uint16_t da)

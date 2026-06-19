@@ -3,7 +3,7 @@
 A **Freenove ESP32-S3 2.8" Display** board turned into a tiny DEC
 PDP-11/40 that boots **V6 Unix** from an SD-card disk image. The console
 appears on the onboard TFT, on Telnet, and on USB-Serial — all three live
-simultaneously.  Also boots RT-11, and an early version of RSTS.
+simultaneously. Also boots RT-11 V5, RSTS V4B, RSX-11M V4.0, and XXDP.
 
 For full operating instructions, SD card setup, configuration-file reference,
 and menu documentation, see the [PDP 11/40 Emulator User Guide](docs/user-manual.md).
@@ -40,6 +40,7 @@ everything else.
 | **XXDP+ diagnostics** | `xxdp25.dsk` (RL02) | ✅ Boots to XXDP-SM `.` monitor    |
 | RT-11 SJ V5           | `rt11v5.dsk` (RK05) | ✅ Boots to . prompt, runs DIR   |
 | RSTS V4B              | `RSTS11v4B.dsk`     |✅ Boots to READY prompt          |
+| RSX-11M V4.0          | RL01/RL02 image      | ✅ Boots successfully            |
 
 Still testing other operating systems.   I think 211 BSD isn't going to work on the PDP-11/40
 
@@ -145,6 +146,9 @@ port    = 23
 [console]
 boot_input = ""               ; e.g. "unix\r" or "^CSTART\r"
 
+[serial1]
+enabled = false               ; TT1 file-backed DL11 at 0176500
+
 [diag]
 pcping      = 5               ; sec between PC dumps; 0 disables
 serialdelay = 20              ; ms gate between bursty input chars
@@ -206,6 +210,82 @@ M9312-style boot ROM still boot from RK0 or RL0.
 - **Settings menu:** tap the screen or press the onboard button. From
   there you can mount/dismount existing disk images, reboot the PDP-11,
   adjust brightness, and view WiFi / Telnet / FTP status.
+
+### Guest-to-emulator control channel
+
+The VPDP command channel on TTY0 is always available. When `[serial1]
+enabled = true`, TT1 is additionally exposed as a DL11-compatible serial port
+at `0176500` using receive vector `0300` and transmit vector `0304`. A PDP
+program can access SD-card files directly through commands regardless of the
+TT1 setting; enabling TT1 also permits background file streaming through that
+emulated serial port. Commands can also change active RK/RL media or reboot the
+emulated PDP:
+
+```text
+ESC ] VPDP ; command-text ETX-or-EOT
+```
+
+In C, for example:
+
+```c
+printf("\033]VPDP;OUT;OPEN;/results.txt;APPEND;REPLY\003");
+```
+
+RSTS/E BASIC-PLUS displays `CHR$(27)` as `$` on its console. The emulator
+therefore also accepts `$]VPDP;` as a compatibility prefix. For example:
+
+```text
+PRINT CHR$(27);"]VPDP;OUT;OPEN;/TEST1.DAT";CHR$(3)
+```
+
+The tested BASIC-PLUS form above opens `/TEST1.DAT` in append mode. Add
+`;REPLY` before `CHR$(3)` to return a framed acknowledgement to the PDP
+program.
+
+The complete frame is intercepted and is not shown on the TFT, USB serial, or
+Telnet. Command text is limited to 256 bytes. Printable characters plus CR,
+LF, BEL, and TAB are accepted. ETX (`\003`) or EOT (`\004`) executes it; any
+other non-printable character aborts it. Formatting controls are removed from
+path arguments but remain unchanged in `OUTASCII` data.
+Commands requesting `REPLY` receive an ETX-terminated frame in the KL11 input
+queue using the same format.
+
+Common commands:
+
+```text
+IN;OPEN;/commands.txt;EOF=0x04;NOTIFY;REPLY
+IN;CLOSE;REPLY
+OUT;OPEN;/results.txt;APPEND;REPLY
+OUT;CLOSE;REPLY
+TTY;STATUS;REPLY
+OUTASCII;data written exactly, including CR/LF/BEL/TAB
+OUTHEX;0001027F80FF
+INASCII
+INHEX:32
+DISK;MOUNT;RL1;/new.dsk;REPLY
+DISK;DISMOUNT;RL1;REPLY
+DISK;STATUS;ALL;REPLY
+PDP;REBOOT;COLD;REPLY
+```
+
+The direct `OUTASCII` and `OUTHEX` commands write to the currently connected
+TT1 output file and flush it before returning. `OUTHEX` converts hexadecimal
+pairs to binary bytes and permits spaces between pairs. Prefix the payload
+with `REPLY;` to request an acknowledgement.
+
+`INASCII` returns the next input-file line over TTY0, followed by a carriage
+return.
+`INHEX:n` reads up to `n` bytes (`1` through `128`) and returns uppercase
+hexadecimal followed by a carriage return. If fewer than `n` bytes remain,
+the response contains those bytes; the following read returns `*>EOF<*`.
+Every input response, including `*>EOF<*` and errors, is terminated by a
+carriage return.
+Direct reads share the TT1 input position; do not have a TT1 driver consume
+the same stream concurrently.
+
+Runtime disk changes do not rewrite `pdpconfig.ini`. Before dismounting, the
+guest OS must flush and offline/dismount the device using its OS-specific
+command. RP0 runtime commands are not supported by this interface.
 
 ### Booting V6 Unix
 

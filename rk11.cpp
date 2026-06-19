@@ -106,6 +106,16 @@ void reset()
         attached_drives[i] = disk_is_mounted(i);
 }
 
+void media_changed(int unit, bool mounted)
+{
+    if (unit < 0 || unit >= (int)NUM_RK_DRIVES) return;
+    attached_drives[unit] = mounted;
+    if (!mounted && (((RKDA >> 13) & 7) == unit))
+        RKDS &= ~(1 << 7);
+    else if (mounted)
+        RKDS |= (1 << 7);
+}
+
 static uint32_t da_to_offset(uint16_t da)
 {
     uint32_t cyl  = (da >> 5) & 0xFF;

@@ -17,9 +17,16 @@ enum {
 // remains responsible for enforcing its media geometry.
 // Returns true on success.
 bool disk_mount(int slot, const char* path);
+bool disk_mount_mode(int slot, const char* path, bool force_readonly);
 
 // Close the image and free the slot.
 void disk_dismount(int slot);
+void disk_flush_all();
+
+// Close and reopen every currently mounted image, preserving path and
+// read-only mode. Used before a PDP cold reboot so the new boot does not
+// depend on long-lived SD_MMC File handles.
+bool disk_reopen_all();
 
 bool        disk_is_mounted(int slot);
 bool        disk_is_readonly(int slot);   // true if the image opened read-only

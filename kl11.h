@@ -31,6 +31,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 // sam11 software emulation of DEC PDP-11/40 KL11 Main TTY
+#include <stddef.h>
 #include "pdp1140.h"
 
 namespace kl11 {
@@ -61,5 +62,14 @@ extern uint32_t serial_in_delay_ms;
 // The KL11 push path is non-blocking; this turns the 8 KB FIFO into
 // actual Serial.write() output at whatever pace the host can take.
 void drain_serial_out();
+
+// Queue a framed emulator-control response into the KL11 receive stream.
+// The payload is wrapped as ESC ] VPDP ; payload ETX and is delivered before
+// interactive USB/Telnet input so response frames cannot be interleaved.
+bool queue_control_reply(const char* payload);
+
+// Queue unframed bytes into the TTY0 KL11 receive stream. Used by direct
+// INASCII/INHEX commands, which return one CR/LF-terminated data line.
+bool queue_input_bytes(const uint8_t* data, size_t bytes);
 
 };  // namespace kl11

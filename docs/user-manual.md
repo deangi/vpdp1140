@@ -14,6 +14,22 @@ The emulator can boot and run several PDP-11 operating systems from disk image
 files stored on the SD card. The PDP-11 console is available on the TFT screen,
 USB serial, and Telnet at the same time.
 
+The emulator also provides an optional second serial port, TT1, and a private
+guest-to-emulator command channel. A PDP program can use this channel to:
+
+- Connect or disconnect SD-card files as TT1 input and output streams.
+- Transfer text lines or hex-encoded binary data directly over TTY0 without
+  requiring a guest TT1 device driver.
+- Select an EOF byte and request an EOF notification.
+- Receive optional command status replies through the TTY0 KL11 input queue.
+- Mount, dismount, and query active RL or RK disk images without restarting
+  the ESP32.
+- Cold-reboot the emulated PDP-11 without restarting WiFi, FTP, or Telnet.
+
+These runtime-control capabilities are new and require testing with each guest
+operating system. In particular, the guest must flush and offline/dismount a
+disk before asking the emulator to detach its image.
+
 ![vpdp1140 running RT-11 V5](images/rt11-running.jpeg)
 
 ## Emulated Hardware
@@ -24,6 +40,7 @@ USB serial, and Telnet at the same time.
 | Memory | 256 KB address space minus the 8 KB I/O page, giving 248 KB RAM |
 | MMU | KT11-D style 18-bit mapping |
 | Console | KL11 console at `0177560`, vector `060` |
+| Alternate serial | Optional file-backed DL11-compatible TT1 at `0176500`, receive vector `0300`, transmit vector `0304` |
 | RK disk | RK11 controller for RK05 images |
 | RL disk | RL11 controller, up to two normal RL drives in common configurations, with four host slots available as `DL0`..`DL3` |
 | RP disk | Optional secondary RH11/RP04-RP06 disk as `RP0`; testing mode, not verified yet, and not currently bootable |
@@ -44,6 +61,7 @@ These systems boot with this release:
 | UNIX V6 | RK05 | Boots from `@` to the `#` shell |
 | XXDP V2.2 | RL02 | Boots the XXDP monitor |
 | XXDP V2.5 | RL02 | Boots the XXDP monitor |
+| RSX-11M V4.0 | RL01/RL02 | Boots successfully |
 
 Other PDP-11 operating systems may probe hardware that is incomplete,
 configured differently, or intentionally disabled for compatibility. RSTS/E V7
@@ -169,6 +187,9 @@ title = PDP 11/40
 [console]
 boot_input = ""
 
+[serial1]
+enabled = false
+
 [diag]
 pcping      = 5
 serialdelay = 20
@@ -232,6 +253,17 @@ boot_input = "unix\r"
 boot_input = "^CSTART\r"
 boot_input = "\x03START\r"
 ```
+
+### `[serial1]`
+
+| Key | Values | Description |
+| --- | --- | --- |
+| `enabled` | Boolean | Enables the file-backed TT1 DL11 device at `0176500`. |
+
+TT1 uses receive vector `0300`, transmit vector `0304`, and BR4. Files are
+connected at runtime through private commands sent by a PDP program on TTY0.
+Keeping this disabled avoids changing device discovery and floating-vector
+allocation for operating systems that are not configured for a second TTY.
 
 ### `[diag]`
 
@@ -370,6 +402,154 @@ and FileZilla.
 
 The FTP status pill uses the same color convention as Telnet: dim/off when not
 listening, green when listening, yellow when connected.
+
+## Guest-to-Emulator Commands
+
+A PDP program can communicate with the emulator by printing a private frame on
+the TTY0 console:
+
+The TTY0 command channel is always available. The `[serial1] enabled` setting
+controls only whether the additional TT1 DL11-compatible device is exposed for
+background file streaming. Direct file commands work with TT1 disabled.
+
+```text
+ESC ] VPDP ; command-text ETX-or-EOT
+```
+
+The byte form is:
+
+```text
+\033]VPDP;command-text\003
+\033]VPDP;command-text\004
+```
+
+### BASIC-PLUS Compatibility
+
+RSTS/E BASIC-PLUS displays `CHR$(27)` as `$` on console output. The emulator
+accepts `$]VPDP;` in addition to the canonical ESC prefix so BASIC programs can
+use the channel:
+
+```text
+PRINT CHR$(27);"]VPDP;OUT;OPEN;/TEST1.DAT";CHR$(3)
+```
+
+This opens `/TEST1.DAT` in append mode. BASIC-PLUS may insert CR/LF while
+wrapping a long console line; these bytes are accepted inside the frame and
+removed from path arguments. Add `;REPLY` before `CHR$(3)` when the program
+needs an acknowledgement returned through TTY0.
+
+Once the complete prefix matches, the frame is intercepted and is not sent to
+the TFT, USB serial, or Telnet. Command text may contain up to 256 bytes.
+Printable ASCII plus CR, LF, BEL, and TAB are accepted. ETX (`0x03`) or EOT
+(`0x04`) terminates and executes the command. If the terminator is lost, any
+other non-printable character aborts the parser. The accepted controls are
+removed from path arguments but remain unchanged in `OUTASCII` data.
+
+Add `REPLY` to request status through the KL11 TTY0 input queue. Replies use the
+same `ESC ] VPDP;... ETX` framing and are delivered as a complete frame before
+interactive USB or Telnet input. Emulator-generated framed replies use ETX.
+
+### File Connection Commands
+
+These commands open and close the files used by direct VPDP transfers. They
+work with `[serial1] enabled = false`. Enable `[serial1]` only when the guest
+will also transfer data through the emulated TT1 hardware:
+
+```text
+IN;OPEN;/commands.txt;EOF=0x04;NOTIFY;REPLY
+IN;CLOSE;REPLY
+OUT;OPEN;/results.txt;APPEND;REPLY
+OUT;OPEN;/results.txt;TRUNCATE;REPLY
+OUT;CLOSE;REPLY
+TTY;STATUS;REPLY
+CLOSE;ALL;REPLY
+```
+
+`EOF=0x04` injects Control-D after the final input byte. Use `EOF=0x1A` for
+Control-Z or `EOF=NONE` to disconnect without an EOF byte. `NOTIFY` sends an
+unsolicited `EVENT;TTY;IN;EOF;path` frame to TTY0 when EOF is reached.
+
+Disconnecting TT1 output always drains pending bytes, flushes the file, and
+then closes it. The emulator rejects attempts to use the same path for input
+and output or to use a mounted disk image as a TTY file.
+
+### Direct File Data Commands
+
+These commands access the same files and file positions connected by
+`IN;OPEN` and `OUT;OPEN`, without requiring the guest to use the TT1 device:
+
+```text
+OUTASCII;data written exactly, including CR/LF/BEL/TAB
+OUTASCII;REPLY;data written exactly, including CR/LF/BEL/TAB
+OUTHEX;0001027F80FF
+OUTHEX;REPLY;00 01 02 7F 80 FF
+INASCII
+INHEX:32
+INHEX;32
+```
+
+`OUTASCII` writes every character following its first semicolon exactly as
+supplied, including CR, LF, BEL, and TAB. It does not add a line ending.
+Semicolons in the data are preserved. `OUTHEX` ignores spaces and tabs,
+converts each pair of hexadecimal
+digits to one binary byte, and rejects invalid or odd-length data. A maximum
+of 128 binary bytes can be written by one `OUTHEX` command. Both commands
+drain queued TT1 output first and flush the SD file before returning. They are
+silent unless `REPLY;` appears before the data; failures without `REPLY` are
+written to the ESP32 diagnostic serial log.
+
+`INASCII` consumes the next text line from the connected input stream and
+returns it over the TTY0 KL11 input queue followed by one carriage return.
+Carriage returns read from the file are removed and line feed ends the line.
+A line longer than 240 characters is returned in successive chunks.
+
+`INHEX:n` or `INHEX;n` consumes up to `n` bytes and returns them as one line of
+uppercase hexadecimal followed by one carriage return. The count must be from
+1 through 128. If fewer than the requested number of bytes remain, the command
+returns all remaining bytes; the next input command returns `*>EOF<*`.
+
+Both input commands return the line `*>EOF<*` after all buffered and file data
+has been consumed, or an `ERROR;...` line when no input file has been
+connected. Every input response line, including data, `*>EOF<*`, and errors,
+is terminated by one carriage return.
+
+Direct reads consume the same pending TT1 receive register, FIFO, and SD-file
+position used by the alternate serial port. Do not run a guest TT1 driver and
+direct `INASCII`/`INHEX` reads against the same stream concurrently.
+
+### Runtime Disk Commands
+
+```text
+DISK;MOUNT;RL0;/disk.img;REPLY
+DISK;MOUNT;RL1;/disk.img;READONLY;REPLY
+DISK;MOUNT;RK0;/disk.img;REPLY
+DISK;DISMOUNT;RL1;REPLY
+DISK;STATUS;RL1;REPLY
+DISK;STATUS;ALL;REPLY
+```
+
+RL commands accept `RL0` through `RL3`; `DL0` through `DL3` are aliases. RK
+commands currently accept `RK0`. Commands are accepted only for the controller
+selected by the active configuration. Runtime changes are temporary and do
+not rewrite `/pdpconfig.ini`.
+
+The emulator cannot determine whether a guest filesystem has dirty buffers.
+The PDP operating system must flush and offline/dismount the device before the
+PDP program sends `DISK;DISMOUNT`. After attaching new media, use the guest
+OS-specific online or mount command. The replacement image is opened and
+validated before the old image is closed, so a failed mount leaves the old
+media attached.
+
+### PDP Reboot Command
+
+```text
+PDP;REBOOT;COLD
+PDP;REBOOT;COLD;REPLY
+```
+
+This follows the same cold-boot path as the **Reboot PDP-11** menu action. It
+flushes and disconnects TT1 files, resets PDP memory and devices, and boots
+from the configured media without restarting WiFi, FTP, Telnet, or the ESP32.
 
 ## On-Device Menus
 

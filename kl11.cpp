@@ -56,6 +56,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // fast-typed input without backpressuring the producers.
 #include "console.h"
 #include "telnet.h"
+#include "emu_control.h"
 
 #if USE_11_45
 #define procNS kb11
@@ -77,6 +78,29 @@ uint16_t TPB;
 EXT_RAM_BSS_ATTR static uint8_t serial_out_storage[VPDP_KL11_FIFO_BYTES];
 static Fifo g_serial_out;
 static bool g_serial_out_inited = false;
+
+#define VPDP_CONTROL_REPLY_BYTES 1024
+static uint8_t control_reply_storage[VPDP_CONTROL_REPLY_BYTES];
+static Fifo g_control_reply;
+static bool g_control_reply_inited = false;
+
+static const uint8_t CONTROL_PREFIX[] = { 033, ']', 'V', 'P', 'D', 'P', ';' };
+static constexpr size_t CONTROL_PREFIX_LEN = sizeof(CONTROL_PREFIX);
+// RSTS/E BASIC-PLUS has been observed emitting '$' for CHR$(27) on console
+// output. Accept "$]VPDP;" as a compatibility spelling so a BASIC program can
+// still reach the private channel. ESC remains the canonical prefix.
+static constexpr uint8_t CONTROL_PREFIX_BASIC = '$';
+static constexpr size_t CONTROL_COMMAND_MAX = 256;
+enum ControlParseState {
+    CONTROL_IDLE,
+    CONTROL_PREFIX_MATCH,
+    CONTROL_TEXT
+};
+static ControlParseState control_state = CONTROL_IDLE;
+static uint8_t control_prefix_pos = 0;
+static uint8_t control_prefix_first = 0;
+static char control_command[CONTROL_COMMAND_MAX + 1];
+static size_t control_command_len = 0;
 
 // Inter-character delay (ms) between successive TKB loads (set from
 // [diag] serialdelay in pdpconfig.ini). After each addchar we record the
@@ -105,6 +129,14 @@ void reset()
         g_serial_out.init(serial_out_storage, VPDP_KL11_FIFO_BYTES);
         g_serial_out_inited = true;
     }
+    if (!g_control_reply_inited) {
+        g_control_reply.init(control_reply_storage, VPDP_CONTROL_REPLY_BYTES);
+        g_control_reply_inited = true;
+    }
+    control_state = CONTROL_IDLE;
+    control_prefix_pos = 0;
+    control_prefix_first = 0;
+    control_command_len = 0;
     s_rx_poll_div = KL11_RX_POLL_DIV - 1;
 }
 
@@ -163,6 +195,114 @@ static void addchar(char c)
     }
 }
 
+bool queue_control_reply(const char* payload)
+{
+    if (!payload) return false;
+    if (!g_control_reply_inited) {
+        g_control_reply.init(control_reply_storage, VPDP_CONTROL_REPLY_BYTES);
+        g_control_reply_inited = true;
+    }
+    size_t payload_len = strlen(payload);
+    size_t required = CONTROL_PREFIX_LEN + payload_len + 1;
+    if (required > g_control_reply.capacity() - g_control_reply.count())
+        return false;
+    for (size_t i = 0; i < CONTROL_PREFIX_LEN; i++)
+        g_control_reply.push(CONTROL_PREFIX[i]);
+    for (size_t i = 0; i < payload_len; i++)
+        g_control_reply.push((uint8_t)payload[i]);
+    g_control_reply.push(003);
+    return true;
+}
+
+bool queue_input_bytes(const uint8_t* data, size_t bytes)
+{
+    if (!data || bytes == 0) return true;
+    if (!g_control_reply_inited) {
+        g_control_reply.init(control_reply_storage, VPDP_CONTROL_REPLY_BYTES);
+        g_control_reply_inited = true;
+    }
+    if (bytes > g_control_reply.capacity() - g_control_reply.count())
+        return false;
+    for (size_t i = 0; i < bytes; i++)
+        g_control_reply.push(data[i] & 0x7f);
+    return true;
+}
+
+static void emit_console_byte(uint8_t out)
+{
+    console_feed(out);
+    telnet_write(out);
+    g_serial_out.push(out);
+}
+
+static void reset_control_parser()
+{
+    control_state = CONTROL_IDLE;
+    control_prefix_pos = 0;
+    control_prefix_first = 0;
+    control_command_len = 0;
+}
+
+static void process_console_output(uint8_t out)
+{
+    if (control_state == CONTROL_IDLE) {
+        if (out == CONTROL_PREFIX[0] || out == CONTROL_PREFIX_BASIC) {
+            control_state = CONTROL_PREFIX_MATCH;
+            control_prefix_pos = 1;
+            control_prefix_first = out;
+        } else {
+            emit_console_byte(out);
+        }
+        return;
+    }
+
+    if (control_state == CONTROL_PREFIX_MATCH) {
+        if (out == CONTROL_PREFIX[control_prefix_pos]) {
+            if (++control_prefix_pos == CONTROL_PREFIX_LEN) {
+                control_state = CONTROL_TEXT;
+                control_command_len = 0;
+                if (control_prefix_first == CONTROL_PREFIX_BASIC)
+                    LOG("EMU control: accepted BASIC-PLUS $]VPDP compatibility prefix");
+            }
+            return;
+        }
+
+        // Not our private sequence. Replay the delayed candidate unchanged.
+        emit_console_byte(control_prefix_first);
+        for (uint8_t i = 1; i < control_prefix_pos; i++)
+            emit_console_byte(CONTROL_PREFIX[i]);
+        emit_console_byte(out);
+        reset_control_parser();
+        return;
+    }
+
+    if (out == 003 || out == 004) {
+        control_command[control_command_len] = 0;
+        if (!emu_control::submit(control_command))
+            LOGE("EMU command queue full; command discarded");
+        reset_control_parser();
+        return;
+    }
+
+    // CR, LF, BEL, and TAB are permitted inside command text. This allows
+    // OUTASCII to carry formatting characters and lets structured command
+    // handlers remove terminal-inserted wrapping from path arguments.
+    bool allowed_control =
+        out == '\r' || out == '\n' || out == '\a' || out == '\t';
+
+    // ETX and EOT are valid terminators. Any other non-printable character,
+    // or a lost terminator that lets the command exceed 256 characters,
+    // aborts the hidden frame and restores normal console parsing.
+    if ((!allowed_control && (out < 0x20 || out > 0x7e)) ||
+        control_command_len >= CONTROL_COMMAND_MAX) {
+        LOGE("EMU command aborted: missing ETX/EOT or invalid byte %03o",
+             (unsigned)out);
+        reset_control_parser();
+        return;
+    }
+    control_command[control_command_len++] = (char)out;
+}
+
 uint8_t count;
 
 void poll()
@@ -214,13 +354,17 @@ void poll()
                 static bool prefer_telnet = false;
                 uint8_t c;
                 bool got;
-                if (prefer_telnet)
+                bool control_reply = g_control_reply.pop(&c);
+                if (control_reply) {
+                    got = true;
+                } else if (prefer_telnet) {
                     got = telnet_in_pop(&c) || console_key_pop(&c);
-                else
+                } else {
                     got = console_key_pop(&c) || telnet_in_pop(&c);
+                }
                 if (got)
                 {
-                    prefer_telnet = !prefer_telnet;
+                    if (!control_reply) prefer_telnet = !prefer_telnet;
                     if (c == '\n' || c == '\r')
                     {
                         procNS::trapped |= VTRAP_ON_NL;
@@ -250,9 +394,7 @@ void poll()
         if (++count > 32)
         {
             uint8_t out = TPB & 0x7f;  // strip parity bit
-            console_feed(out);         // -> TFT-out FIFO
-            telnet_write(out);         // -> Telnet-out FIFO (with IAC escape)
-            g_serial_out.push(out);    // -> USB-Serial-out FIFO
+            process_console_output(out);
             TPS |= 0x80;
             if (TPS & (1 << 6))
             {

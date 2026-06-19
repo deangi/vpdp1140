@@ -66,6 +66,7 @@ uint16_t read16(uint32_t a);
 // deferred RKINT so the guest's WAIT instruction has time to execute
 // before we deliver the disk-done IRQ.
 void tick();
+void media_changed(int unit, bool mounted);
 };  // namespace rk11
 
 enum

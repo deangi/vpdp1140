@@ -189,6 +189,7 @@ void config_apply_compiled_defaults(AppConfig& cfg) {
   cfg.telnet_port    = TELNET_PORT;
 
   cfg.boot_input_len = 0;
+  cfg.serial1_enabled = false;
 
   cfg.ftp_enabled    = true;
   cfg.ftp_port       = FTP_PORT;
@@ -246,6 +247,8 @@ static void parse_line(AppConfig& cfg, String& section, const String& raw,
   } else if (section == "console") {
     if      (key == "boot_input" || key == "typeahead" || key == "boot_keys")
       config_set_boot_input(cfg, val);
+  } else if (section == "serial1") {
+    if      (key == "enabled") cfg.serial1_enabled = truthy(val);
   } else if (section == "ftp") {
     if      (key == "enabled")  cfg.ftp_enabled  = truthy(val);
     else if (key == "port")     cfg.ftp_port     = val.toInt();
@@ -367,6 +370,7 @@ bool config_load_pdp(AppConfig& cfg) {
   cfg.disk_rp0 = "";
   cfg.disk_rp0_type = "rp06";
   cfg.boot_input_len = 0;
+  cfg.serial1_enabled = false;
 
   bool existed = parse_config_file(cfg, PDP_CFG_PATH, CONFIG_EMULATOR);
   if (!existed) {
@@ -432,6 +436,12 @@ bool config_write_default_pdp(const AppConfig& cfg) {
   f.println("; boot_input is injected into the KL11 input queue after each");
   f.println("; PDP-11 boot/reset. Escapes: \\r \\n \\t \\e \\xHH \\ooo ^C ^[ ^?.");
   f.printf("boot_input = \"%s\"\r\n", escaped_bytes(cfg.boot_input, cfg.boot_input_len).c_str());
+  f.println();
+  f.println("[serial1]");
+  f.println("; Optional second DL11-compatible TTY at 0176500. The TTY0 VPDP");
+  f.println("; command channel and direct SD file commands are always available;");
+  f.println("; this setting enables only TT1 background file streaming.");
+  f.printf("enabled = %s\r\n", cfg.serial1_enabled ? "true" : "false");
   f.println();
   f.println("[diag]");
   f.println("; pcping      = seconds between host's periodic PC/register dump");
@@ -618,6 +628,8 @@ void config_print(const AppConfig& cfg) {
   LOG("[console] boot_input=\"%s\" (%u bytes)",
       escaped_bytes(cfg.boot_input, cfg.boot_input_len).c_str(),
       (unsigned)cfg.boot_input_len);
+  LOG("[serial1] enabled=%s  CSR=776500  RX-vector=300  TX-vector=304",
+      cfg.serial1_enabled ? "true" : "false");
   LOG("[ftp]     enabled=%s  port=%d  user=\"%s\" (password=%d chars)",
       cfg.ftp_enabled ? "true" : "false", cfg.ftp_port,
       cfg.ftp_user.c_str(), (int)cfg.ftp_password.length());

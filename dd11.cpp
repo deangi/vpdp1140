@@ -46,6 +46,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rk11.h"
 #include "rl11.h"
 #include "rh11.h"
+#include "dl11_file.h"
 #include "sam11.h"
 #include "xmem.h"
 #include "platform.h"  // for LOG, g_serial_silenced
@@ -363,6 +364,16 @@ void write16(uint32_t a, uint16_t v)
         kl11::write16(a, v);
         return;
 
+    case DEV_DL_1_TTY_OUT_DATA:
+    case DEV_DL_1_TTY_OUT_STATUS:
+    case DEV_DL_1_TTY_IN_DATA:
+    case DEV_DL_1_TTY_IN_STATUS:
+        if (dl11_file::enabled()) {
+            dl11_file::write16(a, v);
+            return;
+        }
+        break;
+
     default:
         break;
     }
@@ -590,6 +601,16 @@ uint16_t read16(uint32_t a)
     case DEV_CONSOLE_TTY_IN_DATA:
     case DEV_CONSOLE_TTY_IN_STATUS:
         readReturn kl11::read16(a);
+        break;
+
+    case DEV_DL_1_TTY_OUT_DATA:
+    case DEV_DL_1_TTY_OUT_STATUS:
+    case DEV_DL_1_TTY_IN_DATA:
+    case DEV_DL_1_TTY_IN_STATUS:
+        if (dl11_file::enabled()) {
+            readReturn dl11_file::read16(a);
+            break;
+        }
         break;
 
     default:
