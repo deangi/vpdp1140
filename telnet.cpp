@@ -2,6 +2,7 @@
 #include "console.h"
 #include "platform.h"
 #include "fifo.h"
+#include "telnet_shell.h"
 #include <WiFi.h>
 #include "esp_attr.h"
 #ifndef EXT_RAM_BSS_ATTR
@@ -47,10 +48,14 @@ enum TelnetRxState : uint8_t {
 };
 static TelnetRxState g_rx_state = RX_DATA;
 static bool g_rx_after_cr = false;
+static uint8_t g_shell_escape_pos = 0;
+static uint32_t g_shell_escape_ms = 0;
 
 static void reset_rx_parser() {
   g_rx_state = RX_DATA;
   g_rx_after_cr = false;
+  g_shell_escape_pos = 0;
+  g_shell_escape_ms = 0;
 }
 
 static void ensure_fifos_inited() {
@@ -62,6 +67,7 @@ static void ensure_fifos_inited() {
 
 void telnet_begin(uint16_t port, bool enabled) {
   ensure_fifos_inited();
+  telnet_shell_init();
   g_enabled = enabled;
   g_port    = port;
   if (!enabled) { LOG("telnet: disabled in config"); return; }
@@ -91,6 +97,78 @@ static void on_connect() {
   g_telnet_out.clear();     // drop any stale output queued before connect
 }
 
+static void send_shell_banner() {
+  g_client.print(
+      "\r\nvpdp1140 management shell\r\n"
+      "PDP-11 emulation continues; Telnet I/O is temporarily detached.\r\n"
+      "Type help for commands, exit to return to the PDP console.\r\n"
+      "vpdp:/> ");
+}
+
+static void enter_shell() {
+  g_telnet_in.clear();
+  g_telnet_out.clear();
+  telnet_shell_enter();
+  send_shell_banner();
+}
+
+static void route_console_input(uint8_t c) {
+  if (telnet_shell_active()) {
+    if (c == 0x08 || c == 0x7f) {
+      if (telnet_shell_backspace()) g_client.print("\b \b");
+      return;
+    }
+    if (c == '\r' || c == '\n') {
+      telnet_shell_input('\r');
+      g_client.print("\r\n");
+      return;
+    }
+    if (telnet_shell_input(c)) g_client.write(&c, 1);
+    return;
+  }
+
+  // ESC >> detaches this Telnet session from the PDP console. Prefix bytes
+  // are delayed until the sequence either matches or fails; failures are
+  // replayed unchanged so normal terminal escape sequences still work.
+  if (g_shell_escape_pos == 0) {
+    if (c == 0x1b) {
+      g_shell_escape_pos = 1;
+      g_shell_escape_ms = millis();
+    }
+    else g_telnet_in.push(c);
+    return;
+  }
+  if (g_shell_escape_pos == 1) {
+    if (c == '>') {
+      g_shell_escape_pos = 2;
+      g_shell_escape_ms = millis();
+      return;
+    }
+    g_telnet_in.push(0x1b);
+    g_shell_escape_pos = 0;
+    route_console_input(c);
+    return;
+  }
+  if (c == '>') {
+    g_shell_escape_pos = 0;
+    enter_shell();
+    return;
+  }
+  g_telnet_in.push(0x1b);
+  g_telnet_in.push('>');
+  g_shell_escape_pos = 0;
+  route_console_input(c);
+}
+
+static void expire_shell_escape() {
+  if (!g_shell_escape_pos ||
+      (uint32_t)(millis() - g_shell_escape_ms) < 1000) return;
+  g_telnet_in.push(0x1b);
+  if (g_shell_escape_pos == 2) g_telnet_in.push('>');
+  g_shell_escape_pos = 0;
+  g_shell_escape_ms = 0;
+}
+
 static void drain_rx() {
   while (g_client.available()) {
     int ch = g_client.read();
@@ -108,13 +186,13 @@ static void drain_rx() {
           break;
         }
         g_rx_after_cr = false;
-        g_telnet_in.push(c);
+        route_console_input(c);
         if (c == 0x0D) g_rx_after_cr = true;
         break;
 
       case RX_IAC:
         if (c == T_IAC) {
-          g_telnet_in.push(T_IAC);
+          route_console_input(T_IAC);
           g_rx_state = RX_DATA;
         } else if (c == T_SB) {
           g_rx_state = RX_SUBNEG;
@@ -163,7 +241,16 @@ void telnet_poll() {
   }
 
   if (g_client && g_client.connected()) {
+    expire_shell_escape();
     drain_rx();
+    const uint8_t* shell_data;
+    size_t shell_bytes;
+    while ((shell_bytes = telnet_shell_output_peek(&shell_data)) > 0) {
+      size_t written = g_client.write(shell_data, shell_bytes);
+      if (written == 0) break;
+      telnet_shell_output_consume(written);
+      if (written < shell_bytes) break;
+    }
     // Flush queued console output in contiguous chunks from the FIFO.
     // peek() returns the largest run that doesn't wrap, so at most two
     // calls are needed to drain the ring. We stop early if write() can't
@@ -171,7 +258,7 @@ void telnet_poll() {
     // queued for the next telnet_poll().
     const uint8_t* p;
     size_t n;
-    while ((n = g_telnet_out.peek(&p)) > 0) {
+    while (!telnet_shell_active() && (n = g_telnet_out.peek(&p)) > 0) {
       size_t w = g_client.write(p, n);
       if (w == 0) break;
       g_telnet_out.consume(w);
@@ -179,6 +266,7 @@ void telnet_poll() {
     }
   } else if (g_client) {                    // client went away
     g_client.stop();
+    telnet_shell_disconnect();
     reset_rx_parser();
     g_client_ip[0] = 0;
     g_telnet_out.clear();
@@ -197,7 +285,7 @@ void telnet_write(uint8_t c) {
   // so it never accumulates stale bytes a future client would see.
   // IAC bytes in the data stream are escaped by emitting them twice
   // (RFC 854). A full FIFO drops new bytes silently.
-  if (!g_started) return;
+  if (!g_started || telnet_shell_active()) return;
   g_telnet_out.push(c);
   if (c == T_IAC) g_telnet_out.push(T_IAC);
 }
@@ -207,3 +295,4 @@ bool        telnet_listening() { return g_started && WiFi.status() == WL_CONNECT
 const char* telnet_client_ip() { return g_client_ip; }
 uint16_t    telnet_port()      { return g_port; }
 bool        telnet_enabled()   { return g_enabled; }
+bool        telnet_shell_connected() { return telnet_shell_active(); }

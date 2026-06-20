@@ -54,6 +54,7 @@
 #include "disk.h"
 #include "console.h"
 #include "telnet.h"
+#include "telnet_shell.h"
 #include "ftp.h"
 #include "touch.h"
 #include "ui.h"
@@ -583,6 +584,7 @@ void loop() {
   // This is where SD file operations, runtime media changes, and TT1 file I/O
   // are allowed to block briefly without stalling an emulated UART register.
   emu_control::poll();
+  telnet_shell_poll();
   if (emu_control::consume_reboot_request()) {
     LOG("EMU command: reboot PDP-11");
     dl11_file::disconnect_all();
@@ -631,6 +633,7 @@ void loop() {
   // While the menu is open the PDP-11 is paused, but FTP remains available.
   if (ui_is_open()) {
     emu_control::poll();
+    telnet_shell_poll();
     ftp_poll();
     delay(8);
     return;
@@ -650,12 +653,14 @@ void loop() {
       console_key_push((uint8_t)Serial.read());   // -> Serial-in FIFO
     ftp_poll();                  // accept + FTP commands/data against SD root
     emu_control::poll();
+    telnet_shell_poll();
     cpu_run(8000);
     console_drain_tft();         // TFT-out FIFO -> ANSI parser -> cell grid
     kl11::drain_serial_out();    // Serial-out FIFO -> Serial.write
   }
   ftp_poll();
   emu_control::poll();
+  telnet_shell_poll();
   console_drain_tft();
   kl11::drain_serial_out();
 

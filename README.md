@@ -211,6 +211,46 @@ M9312-style boot ROM still boot from RK0 or RL0.
   there you can mount/dismount existing disk images, reboot the PDP-11,
   adjust brightness, and view WiFi / Telnet / FTP status.
 
+### Telnet management shell
+
+While connected by Telnet, press `Esc`, then type `>>` to detach that Telnet
+session from the PDP-11 console and enter the emulator management shell:
+
+```text
+ESC >>
+```
+
+The PDP-11 continues running and remains connected to the TFT and USB serial.
+Type `exit` to reconnect Telnet to the PDP console. An incomplete escape
+sequence is replayed to the PDP after one second.
+
+The shell provides:
+
+```text
+pwd
+cd <path>
+ls [path]
+cat <path>
+rm <path>
+mv <source> <destination>
+cp <source> <destination>
+drives
+mount <RL0-RL3|RK0|RP0> <path> [ro]
+dismount <RL0-RL3|RK0|RP0>
+create <rk|rl01|rl02> <path>
+reboot
+help
+exit
+```
+
+File paths may be absolute or relative to the shell's current SD-card
+directory. Quote paths containing spaces. Destructive file commands reject
+mounted disk images, and `mount` requires the target drive to be dismounted
+first. `cat` displays at most the first 100 lines and rejects binary files. The
+guest operating system must flush and offline a drive before it is
+dismounted. `create` makes zero-filled RK05 (2,494,464-byte), RL01
+(5,242,880-byte), or RL02 (10,485,760-byte) images.
+
 ### Guest-to-emulator control channel
 
 The VPDP command channel on TTY0 is always available. When `[serial1]
@@ -314,6 +354,7 @@ command. RP0 runtime commands are not supported by this interface.
 | `ms11.cpp` / `.h`             | RAM controller — routed to our PSRAM block          |
 | `dd11.cpp` / `.h`             | UNIBUS backplane, I/O page dispatch                 |
 | `kl11.cpp` / `.h`             | KL11 console — rewired to TFT+Telnet+USB           |
+| `telnet_shell.cpp` / `.h`     | Telnet management shell and SD-card commands        |
 | `rk11.cpp` / `.h`             | RK11 controller — rewired to `disk.cpp`             |
 | `rl11.cpp` / `.h`             | RL11 controller (fresh implementation; not sam11's) |
 | `rh11.cpp` / `.h`             | RH11/RP04-RP06 secondary disk controller            |

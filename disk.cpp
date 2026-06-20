@@ -17,6 +17,16 @@ struct DriveSlot {
 };
 
 static DriveSlot g_drv[DRIVE_COUNT];
+static char g_last_error[128] = {0};
+
+static void set_last_error(const char* text) {
+  strncpy(g_last_error, text ? text : "", sizeof(g_last_error) - 1);
+  g_last_error[sizeof(g_last_error) - 1] = 0;
+}
+
+const char* disk_last_error() {
+  return g_last_error;
+}
 
 static bool slot_valid(int s) { return s >= 0 && s < DRIVE_COUNT; }
 static const char* slot_name(int s) {
@@ -32,9 +42,14 @@ static const char* slot_name(int s) {
 
 bool disk_mount_mode(int slot, const char* path, bool force_readonly) {
   SD_FTP_StorageGuard guard;
-  if (!slot_valid(slot) || !path || !*path) return false;
+  set_last_error("");
+  if (!slot_valid(slot) || !path || !*path) {
+    set_last_error("invalid drive or path");
+    return false;
+  }
   if (strlen(path) >= sizeof(g_drv[slot].path)) {
     LOGE("disk_mount[%d]: path too long", slot);
+    set_last_error("path is too long");
     return false;
   }
 
@@ -48,6 +63,10 @@ bool disk_mount_mode(int slot, const char* path, bool force_readonly) {
     f = SD_MMC.open(path, "r");
     if (!f) {
       LOGE("disk_mount[%d]: cannot open %s", slot, path);
+      if (!SD_MMC.exists(path))
+        set_last_error("file not found");
+      else
+        set_last_error("cannot open file (file lock or SD handle limit)");
       return false;
     }
     readonly = true;
@@ -64,6 +83,9 @@ bool disk_mount_mode(int slot, const char* path, bool force_readonly) {
   if (sz < MIN_IMAGE || sz > MAX_IMAGE) {
     LOGE("disk_mount[%d]: %s is %u bytes, out of range [%u..%u]",
          slot, path, (unsigned)sz, (unsigned)MIN_IMAGE, (unsigned)MAX_IMAGE);
+    snprintf(g_last_error, sizeof(g_last_error),
+             "image size %u is outside the supported range",
+             (unsigned)sz);
     f.close();
     return false;
   }

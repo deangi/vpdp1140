@@ -19,3 +19,4 @@ bool        telnet_listening();
 const char* telnet_client_ip();          // "" when no client
 uint16_t    telnet_port();
 bool        telnet_enabled();
+bool        telnet_shell_connected();     // client is in management shell

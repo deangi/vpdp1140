@@ -156,7 +156,8 @@ static String escaped_bytes(const uint8_t* bytes, size_t len) {
 
 bool sd_mount() {
   SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0, SD_MMC_D1, SD_MMC_D2, SD_MMC_D3);
-  if (!SD_MMC.begin("/sdcard", false /*1bit*/, false /*format*/, 20000 /*freq*/)) {
+  if (!SD_MMC.begin("/sdcard", false /*1bit*/, false /*format*/,
+                    20000 /*freq*/, SD_MAX_OPEN_FILES)) {
     LOGE("SD_MMC.begin() failed");
     return false;
   }

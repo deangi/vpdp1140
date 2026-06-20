@@ -18,6 +18,7 @@ enum {
 // Returns true on success.
 bool disk_mount(int slot, const char* path);
 bool disk_mount_mode(int slot, const char* path, bool force_readonly);
+const char* disk_last_error();
 
 // Close the image and free the slot.
 void disk_dismount(int slot);

@@ -149,6 +149,17 @@ void reset()
     }
 }
 
+void media_changed(bool mounted)
+{
+    attached = mounted;
+    if (mounted) {
+        set_ready_status();
+    } else {
+        RHDS = 0;
+        RHCS1 |= CS1_RDY;
+    }
+}
+
 static uint32_t bus_addr()
 {
     return ((uint32_t)RHBA) | (((uint32_t)RHBAE & 03u) << 16);

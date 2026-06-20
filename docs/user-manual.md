@@ -403,6 +403,66 @@ and FileZilla.
 The FTP status pill uses the same color convention as Telnet: dim/off when not
 listening, green when listening, yellow when connected.
 
+## Telnet Management Shell
+
+A Telnet user can temporarily detach the Telnet session from the PDP-11
+console and enter an emulator management shell. Press the Escape key and then
+type two greater-than signs:
+
+```text
+ESC >>
+```
+
+The three bytes are `0x1B 0x3E 0x3E`. They are intercepted and are not sent to
+the PDP. If the sequence does not match, its bytes are replayed unchanged to
+the PDP console. An incomplete sequence times out after one second and is also
+replayed.
+
+Entering the shell affects only the current Telnet connection. The PDP-11
+continues running and remains connected to the TFT and USB serial console.
+PDP output is hidden from Telnet while the shell is active. Enter `exit` to
+restore normal Telnet console input and output.
+
+### Shell File Commands
+
+| Command | Description |
+| --- | --- |
+| `pwd` | Show the current SD-card directory. |
+| `cd path` | Change directory. `.` and `..` are normalized safely. |
+| `ls [path]` | List a directory or show one file and its size. |
+| `cat path` | Display the first 100 lines of a text file; binary files are rejected. |
+| `rm path` | Remove a file. Directories and mounted images are rejected. |
+| `mv source destination` | Rename or move a file. Existing destinations are not overwritten. |
+| `cp source destination` | Copy a file. Existing destinations are not overwritten. |
+
+Paths may be absolute or relative to the shell working directory. Single or
+double quotes allow spaces in path arguments. All file operations use the
+same SD-card lock as FTP and the emulator disk layer.
+
+### Shell Emulator Commands
+
+| Command | Description |
+| --- | --- |
+| `drives` | Show every drive, mounted image, image size, and read-only state. |
+| `mount unit path [ro]` | Mount an image read-write or optionally read-only. |
+| `dismount unit` | Flush, close, and detach an image. `unmount` is an alias. |
+| `create rk path` | Create an empty 2,494,464-byte RK05 image. |
+| `create rl01 path` | Create an empty 5,242,880-byte RL01 image. |
+| `create rl02 path` | Create an empty 10,485,760-byte RL02 image. |
+| `reboot` | Schedule a cold PDP-11 reboot without restarting the ESP32. |
+| `help` | Display the command summary. |
+| `exit` | Reconnect Telnet to the PDP-11 console. |
+
+RL units accept `RL0` through `RL3`, with `DL0` through `DL3` as aliases.
+`RK0` is available when the active configuration uses the RK controller.
+`RP0` addresses the experimental RH11/RP secondary disk. A drive must be
+empty before `mount`; use `dismount` first.
+
+Runtime media changes require cooperation from the guest operating system.
+Flush and offline/dismount the guest device before issuing the shell
+`dismount` command. Creating a large zero-filled image can briefly pause CPU
+execution while the SD card is written.
+
 ## Guest-to-Emulator Commands
 
 A PDP program can communicate with the emulator by printing a private frame on

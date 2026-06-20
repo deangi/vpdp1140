@@ -2,8 +2,11 @@
 
 // ---- App metadata ----
 #define APP_TITLE       "vpdp1140"
-#define APP_VERSION     "V1.4"
-#define APP_BUILD_DATE  "2026-06-19"
+#define APP_VERSION     "V1.6"
+#define APP_BUILD_DATE  "2026-06-20"
+
+// Mounted disk images, FTP, TT1, and shell file commands may all hold files open.
+#define SD_MAX_OPEN_FILES 16
 
 // ---- RGB LED (WS2812) ----
 #define LED_PIN         42
