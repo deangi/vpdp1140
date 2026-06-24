@@ -62,6 +62,7 @@ These systems boot with this release:
 | XXDP V2.2 | RL02 | Boots the XXDP monitor |
 | XXDP V2.5 | RL02 | Boots the XXDP monitor |
 | RSX-11M V4.0 | RL01/RL02 | Boots successfully |
+| RSX-11M V4.8 | RL01/RL02 | Boots 124KW mapped system |
 
 Other PDP-11 operating systems may probe hardware that is incomplete,
 configured differently, or intentionally disabled for compatibility. RSTS/E V7
@@ -193,6 +194,9 @@ enabled = false
 [diag]
 pcping      = 5
 serialdelay = 20
+io_trace    = 0
+clock_trace = 0
+console_trace = 0
 trace       = false
 v4b_quirks  = true
 kwp_enabled = false
@@ -271,6 +275,9 @@ allocation for operating systems that are not configured for a second TTY.
 | --- | --- | --- |
 | `pcping` | Seconds | Interval for periodic PC/register dump to USB serial. `0` disables. |
 | `serialdelay` | Milliseconds | Minimum host delay between successive console input bytes. Helps line-buffered hosts avoid overrunning KL11 receive handling. |
+| `io_trace` | Access count | Log the next N I/O-page reads/writes to USB serial, then stop automatically. `0` disables. |
+| `clock_trace` | Event count | Log the next N KW11-L/KW11-P register accesses and interrupt requests/deliveries, then stop automatically. `0` disables. |
+| `console_trace` | Character count | Log the next N characters read by or written by the PDP through the KL11 console data registers, then stop automatically. `0` disables. |
 | `trace` | Boolean | Enables expensive per-instruction panic trace capture. Use only for debugging. |
 | `v4b_quirks` | Boolean | Absorbs selected missing-device probes for RSTS/E V4B compatibility. Default `true`. |
 | `kwp_enabled` | Boolean | Enables KW11-P programmable clock emulation. Default `false`. |
@@ -319,8 +326,8 @@ Common image sizes:
 | --- | --- | --- |
 | RK05 | 2.5 MB | Used by RT-11, UNIX V6, RSTS/E V4B images |
 | RK05 pair/combined images | About 5 MB | Some distributions use paired packs |
-| RL01 | 5 MB | RL11-compatible removable disk pack |
-| RL02 | 10 MB | Common XXDP and RSTS media |
+| RL01 | 5,242,880 bytes | RL11-compatible removable disk pack; exact size required |
+| RL02 | 10,485,760 bytes | Common XXDP and RSTS media; exact size required |
 | RP04/RP05/RP06 | Larger | Optional secondary RH11/RP disk image |
 
 ## Booting
@@ -415,7 +422,7 @@ ESC >>
 
 The three bytes are `0x1B 0x3E 0x3E`. They are intercepted and are not sent to
 the PDP. If the sequence does not match, its bytes are replayed unchanged to
-the PDP console. An incomplete sequence times out after one second and is also
+the PDP console. An incomplete sequence times out after five seconds and is also
 replayed.
 
 Entering the shell affects only the current Telnet connection. The PDP-11
@@ -449,6 +456,8 @@ same SD-card lock as FTP and the emulator disk layer.
 | `create rk path` | Create an empty 2,494,464-byte RK05 image. |
 | `create rl01 path` | Create an empty 5,242,880-byte RL01 image. |
 | `create rl02 path` | Create an empty 10,485,760-byte RL02 image. |
+| `set [name=value]` | Show or change a runtime configuration setting. |
+| `monitor` | Enter the PDP-11 front-panel monitor. |
 | `reboot` | Schedule a cold PDP-11 reboot without restarting the ESP32. |
 | `help` | Display the command summary. |
 | `exit` | Reconnect Telnet to the PDP-11 console. |
@@ -457,11 +466,91 @@ RL units accept `RL0` through `RL3`, with `DL0` through `DL3` as aliases.
 `RK0` is available when the active configuration uses the RK controller.
 `RP0` addresses the experimental RH11/RP secondary disk. A drive must be
 empty before `mount`; use `dismount` first.
+RL mounts accept only exact RL pack images: 5,242,880 bytes for RL01 or
+10,485,760 bytes for RL02. Other file sizes are rejected.
 
 Runtime media changes require cooperation from the guest operating system.
 Flush and offline/dismount the guest device before issuing the shell
 `dismount` command. Creating a large zero-filled image can briefly pause CPU
 execution while the SD card is written.
+
+The runtime-changeable settings are `pcping`, `serialdelay`, `io_trace`,
+`clock_trace`, `console_trace`, `trace`, `title`, and `boot_input`.
+`boot_text` is accepted as an alias for `boot_input`.
+
+```text
+set
+set pcping=1
+set serialdelay=20
+set io_trace=100
+set clock_trace=100
+set console_trace=100
+set trace=false
+set title="PDP 11/40"
+set boot_input="hello\r"
+```
+
+The settings take effect immediately except `boot_input`, which is injected on
+the next PDP-11 reboot. They are not saved to `/pdpconfig.ini` and are lost
+when the ESP32 restarts. Hardware-discovery settings such as TT1, KW11-P, and
+compatibility mode still require editing the configuration file and restarting
+the emulator.
+
+### PDP-11 Monitor
+
+Enter `monitor` from the Telnet management shell. The monitor provides
+front-panel-style execution control and physical-memory examine/deposit
+commands. All addresses and values are octal.
+
+| Command | Description |
+| --- | --- |
+| `P` | Pause the CPU after the current instruction and display its state. |
+| `S` | Execute exactly one instruction, remain paused, and display the new state. |
+| `C` | Continue normal CPU execution. |
+| `D00100` | Dump 16 words beginning at physical address `00100`. |
+| `D00100:00200` | Dump the inclusive physical-address range. |
+| `T 1000` | Trace the next 1000 instructions to USB serial. |
+| `W000100=012345` | Store word `012345` at physical address `000100`. |
+| `>` | Leave monitor mode and return to the management shell. |
+| `?` | Display monitor command help. |
+
+The state shown after `P` and `S` contains PC, R0-R5, SP, PSW, and `NEXT`,
+which gives the virtual address, six-digit octal opcode, and disassembly of
+the instruction that the next `S` command will execute.
+Memory output contains eight six-digit octal words per line followed by the 16
+corresponding bytes in little-endian order. Printable ASCII characters are
+shown; non-printable bytes appear as spaces.
+
+Memory commands operate on aligned 18-bit physical RAM addresses from
+`000000` through `0757776`. The I/O page is excluded so an examine or deposit
+cannot accidentally operate a device or raise a bus-error trap outside CPU
+execution. A range dump is limited to 512 words per command.
+
+Returning to the management shell with `>` preserves the CPU's current
+running or paused state. Use `C` before leaving when execution should resume.
+The CPU also remains paused if the Telnet connection closes while in monitor
+mode.
+
+`T` takes a decimal instruction count. `T 1000` logs the next 1000
+instructions just before execution; `T 0` cancels an active trace. The trace
+is written to USB serial, not the Telnet shell, using the panic-trace register
+format with disassembly appended.
+
+`io_trace=N` logs the next `N` reads or writes to the PDP-11 I/O page, including
+the operation width, octal address and value, guest PC, and remaining count.
+The counter stops automatically at zero. Set it to `0` to cancel an active
+trace.
+
+`clock_trace=N` logs the next `N` KW11-L or KW11-P register accesses,
+interrupt requests, and interrupt deliveries. Each entry identifies the clock
+device, operation or interrupt event, register address/value or vector/BR,
+guest PC, and remaining count. Set it to `0` to cancel an active clock trace.
+
+`console_trace=N` logs the next `N` characters transferred through the KL11
+console data registers. `READ` means the PDP consumed a character from its
+console input; `WRITE` means the PDP wrote a character to its console output.
+Each entry includes the octal byte value, a printable/control representation,
+the guest PC, and remaining count. Set it to `0` to cancel an active trace.
 
 ## Guest-to-Emulator Commands
 
@@ -746,7 +835,7 @@ Check:
 
 - The image is in the SD card root if using the on-device picker.
 - The extension is `.dsk`, `.hdd`, `.img`, or `.ima`.
-- The image size is plausible for the selected controller.
+- RL images are exactly 5,242,880 bytes for RL01 or 10,485,760 bytes for RL02.
 - The image is not being modified over FTP while mounted.
 
 ### Guest OS reports missing or broken hardware

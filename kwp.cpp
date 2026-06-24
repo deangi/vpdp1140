@@ -20,6 +20,7 @@
 #endif
 
 #include "platform.h"
+#include "kw11.h"
 #include "kb11.h"
 #include "kd11.h"
 #include "sam11_platform.h"
@@ -60,7 +61,6 @@ static uint32_t s_last_us = 0;
 static uint32_t s_remainder_us = 0;
 static uint8_t s_poll_divider = 0;
 static bool s_irq_pending = false;
-static constexpr bool KWP_TRACE = false;
 
 static uint8_t rate_index(uint16_t csr)
 {
@@ -80,13 +80,9 @@ static const char *register_name(uint32_t a)
 
 static void log_access(const char *operation, uint32_t a, uint16_t value)
 {
-    if (!KWP_TRACE) return;
-
-    LOG("KW11-P %s %-3s @ %06o val=%06o PC=%06o "
-        "CSR=%06o CSB=%06o CNT=%06o irq=%u enabled=%u",
-        operation, register_name(a), (unsigned)a, (unsigned)value,
-        (unsigned)kd11::curPC, (unsigned)CSR, (unsigned)CSB,
-        (unsigned)CNTR, s_irq_pending ? 1u : 0u, enabled ? 1u : 0u);
+    char detail[24];
+    snprintf(detail, sizeof(detail), "%s %s", operation, register_name(a));
+    kw11::trace_access("KW11-P", detail, a, value);
 }
 
 static void clear_interrupt()
@@ -100,6 +96,7 @@ static void clear_interrupt()
 static void request_interrupt()
 {
     if ((CSR & CSR_IE) && !s_irq_pending) {
+        kw11::trace_interrupt("KW11-P", "request", INTRTC, 6);
         procNS::interrupt(INTRTC, 6);
         s_irq_pending = true;
     }

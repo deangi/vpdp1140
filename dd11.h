@@ -91,6 +91,8 @@ union addr {
 // a bus error. Set false from vpdp1140.ino at boot for RSTS V7 mode.
 extern bool v4b_quirks_enabled;
 
+void set_io_trace(uint32_t count);
+uint32_t io_trace_remaining();
 uint16_t read8(uint32_t addr);
 uint16_t read16(uint32_t addr);
 void write8(uint32_t a, uint16_t v);

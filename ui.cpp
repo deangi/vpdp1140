@@ -3,6 +3,7 @@
 #include "config.h"
 #include "platform.h"
 #include "disk.h"
+#include "rl11.h"
 #include "telnet.h"
 #include "ftp.h"
 #include "appconfig.h"
@@ -130,6 +131,20 @@ static bool slot_live(int slot) {
 
 static bool slot_has_image(int slot) {
   return slot_live(slot) ? disk_is_mounted(slot) : cfg_disk_path(slot).length() > 0;
+}
+
+static bool valid_rl_file_size(const char* path, uint32_t* size_out = nullptr) {
+  SD_FTP_StorageGuard guard;
+  fs::File file = SD_MMC.open(path, "r");
+  if (!file || file.isDirectory()) {
+    if (file) file.close();
+    if (size_out) *size_out = 0;
+    return false;
+  }
+  uint32_t bytes = (uint32_t)file.size();
+  file.close();
+  if (size_out) *size_out = bytes;
+  return rl11::valid_image_size(bytes);
 }
 
 static const char* slot_display_path(int slot) {
@@ -347,8 +362,24 @@ static void activate(int idx) {        // idx = absolute item index
         }
         LOG("ui: mount RK0: %s -> %s", path, ok ? "ok" : "FAIL");
       } else {
+        uint32_t bytes = 0;
+        if (!valid_rl_file_size(path, &bytes)) {
+          LOGE("ui: mount %c: %s rejected, RL image size is %u bytes; expected RL01=%u or RL02=%u",
+               'A' + g_sel, path, (unsigned)bytes,
+               (unsigned)rl11::RL01_IMAGE_BYTES,
+               (unsigned)rl11::RL02_IMAGE_BYTES);
+          go(SC_DRIVES);
+          break;
+        }
         cfg_disk_path(g_sel) = path;
         ok = slot_live(g_sel) ? disk_mount(g_sel, path) : true;
+        if (ok && slot_live(g_sel) && !rl11::validate_mounted_media(g_sel)) {
+          uint32_t mounted_bytes = disk_size_bytes(g_sel);
+          disk_dismount(g_sel);
+          LOGE("ui: mount %c: %s rejected after mount, RL image size is %u bytes",
+               'A' + g_sel, path, (unsigned)mounted_bytes);
+          ok = false;
+        }
         LOG("ui: mount %c: %s -> %s", 'A' + g_sel, path, ok ? "ok" : "FAIL");
       }
       if (g_screen != SC_CLOSED)

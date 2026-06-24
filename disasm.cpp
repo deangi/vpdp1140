@@ -8,6 +8,9 @@
 #include "sam11.h"
 
 #include <Arduino.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
 
 #if USE_11_45
 #define procNS kb11
@@ -215,6 +218,159 @@ void disasm(uint32_t a)
         Serial.print(' ');
         Serial.print(rs[ins & 7]);
     }
+}
+
+static void disasm_append(char* buffer, size_t size, const char* format, ...)
+{
+    size_t used = strlen(buffer);
+    if (used >= size) return;
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer + used, size - used, format, args);
+    va_end(args);
+}
+
+static void disasm_format_operand(uint16_t operand, uint32_t& physical_cursor,
+                                  uint16_t& virtual_cursor,
+                                  char* buffer, size_t size)
+{
+    uint8_t reg = operand & 7;
+    uint8_t mode = (operand >> 3) & 7;
+    uint16_t extension;
+
+    switch (mode)
+    {
+    case 0:
+        disasm_append(buffer, size, "%s", rs[reg]);
+        break;
+    case 1:
+        disasm_append(buffer, size, "(%s)", rs[reg]);
+        break;
+    case 2:
+        if (reg == 7) {
+            extension = dd11::read16(physical_cursor);
+            physical_cursor += 2;
+            virtual_cursor += 2;
+            disasm_append(buffer, size, "#%06o", extension);
+        } else {
+            disasm_append(buffer, size, "(%s)+", rs[reg]);
+        }
+        break;
+    case 3:
+        if (reg == 7) {
+            extension = dd11::read16(physical_cursor);
+            physical_cursor += 2;
+            virtual_cursor += 2;
+            disasm_append(buffer, size, "@#%06o", extension);
+        } else {
+            disasm_append(buffer, size, "@(%s)+", rs[reg]);
+        }
+        break;
+    case 4:
+        disasm_append(buffer, size, "-(%s)", rs[reg]);
+        break;
+    case 5:
+        disasm_append(buffer, size, "@-(%s)", rs[reg]);
+        break;
+    case 6:
+        extension = dd11::read16(physical_cursor);
+        physical_cursor += 2;
+        virtual_cursor += 2;
+        if (reg == 7) {
+            uint16_t target = (uint16_t)(virtual_cursor +
+                                         (int16_t)extension);
+            disasm_append(buffer, size, "%06o", target);
+        } else {
+            disasm_append(buffer, size, "%06o(%s)", extension, rs[reg]);
+        }
+        break;
+    case 7:
+        extension = dd11::read16(physical_cursor);
+        physical_cursor += 2;
+        virtual_cursor += 2;
+        if (reg == 7) {
+            uint16_t target = (uint16_t)(virtual_cursor +
+                                         (int16_t)extension);
+            disasm_append(buffer, size, "@%06o", target);
+        } else {
+            disasm_append(buffer, size, "@%06o(%s)", extension, rs[reg]);
+        }
+        break;
+    }
+}
+
+bool disasm_format(uint32_t address, uint16_t virtual_address,
+                   char* buffer, size_t size)
+{
+    if (!buffer || size == 0) return false;
+    buffer[0] = 0;
+
+    uint16_t instruction = dd11::read16(address);
+    D decoded = {};
+    for (uint8_t i = 0; disamtable[i].inst; i++) {
+        if ((instruction & disamtable[i].inst) == disamtable[i].arg) {
+            decoded = disamtable[i];
+            break;
+        }
+    }
+    if (!decoded.inst) {
+        disasm_append(buffer, size, "???");
+        return false;
+    }
+
+    disasm_append(buffer, size, "%s", decoded.msg);
+    if (decoded.b && (instruction & 0100000))
+        disasm_append(buffer, size, "B");
+
+    uint16_t source = (instruction >> 6) & 077;
+    uint16_t destination = instruction & 077;
+    uint8_t offset = instruction & 0377;
+    uint32_t physical_cursor = address + 2;
+    uint16_t virtual_cursor = virtual_address + 2;
+
+    switch (decoded.flag)
+    {
+    case S | DD:
+        disasm_append(buffer, size, " ");
+        disasm_format_operand(source, physical_cursor, virtual_cursor,
+                              buffer, size);
+        disasm_append(buffer, size, ",");
+        disasm_format_operand(destination, physical_cursor, virtual_cursor,
+                              buffer, size);
+        break;
+    case DD:
+        disasm_append(buffer, size, " ");
+        disasm_format_operand(destination, physical_cursor, virtual_cursor,
+                              buffer, size);
+        break;
+    case RR | O: {
+        uint16_t target = (uint16_t)(virtual_address + 2 -
+                                     2 * (instruction & 077));
+        disasm_append(buffer, size, " %s,%06o",
+                      rs[(instruction >> 6) & 7], target);
+        break;
+    }
+    case O: {
+        int16_t displacement = (int8_t)offset;
+        uint16_t target = (uint16_t)(virtual_address + 2 +
+                                     displacement * 2);
+        disasm_append(buffer, size, " %06o", target);
+        break;
+    }
+    case RR | DD:
+        disasm_append(buffer, size, " %s,",
+                      rs[(instruction >> 6) & 7]);
+        disasm_format_operand(destination, physical_cursor, virtual_cursor,
+                              buffer, size);
+        break;
+    case RR:
+        disasm_append(buffer, size, " %s", rs[instruction & 7]);
+        break;
+    case N:
+        disasm_append(buffer, size, " %03o", instruction & 0377);
+        break;
+    }
+    return true;
 }
 
 void printstate()

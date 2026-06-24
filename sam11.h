@@ -9,6 +9,7 @@
 // kb11.cpp.
 
 #include "pdp1140.h"
+#include <stddef.h>
 
 #ifndef H_SAM11
 #define H_SAM11
@@ -36,6 +37,8 @@ extern const char  users_char[];
 void printstate();
 void panic();
 void disasm(uint32_t ia);
+bool disasm_format(uint32_t ia, uint16_t virtual_address,
+                   char* buffer, size_t size);
 void trap(uint16_t num);
 
 #endif

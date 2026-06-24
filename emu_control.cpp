@@ -260,6 +260,10 @@ static bool controller_active(const char* unit) {
             : cfg.boot_kind == AppConfig::BK_RL;
 }
 
+static bool unit_is_rl(const char* unit) {
+  return unit && (!strncasecmp(unit, "RL", 2) || !strncasecmp(unit, "DL", 2));
+}
+
 static void media_changed(const char* unit, int slot, bool mounted) {
   if (!strncasecmp(unit, "RK", 2))
     rk11::media_changed(slot, mounted);
@@ -414,6 +418,17 @@ static void handle_disk(char* tokens[], int count, bool requested) {
     }
     if (!disk_mount_mode(slot, path, readonly)) {
       reply(requested, "ERROR;DISK_MOUNT_FAILED");
+      return;
+    }
+    if (unit_is_rl(unit) && !rl11::validate_mounted_media(slot)) {
+      uint32_t bytes = disk_size_bytes(slot);
+      disk_dismount(slot);
+      rl11::media_changed(slot, false);
+      LOGE("EMU DISK MOUNT rejected %s path=%s size=%lu expected RL01=%lu RL02=%lu",
+           unit, path, (unsigned long)bytes,
+           (unsigned long)rl11::RL01_IMAGE_BYTES,
+           (unsigned long)rl11::RL02_IMAGE_BYTES);
+      reply(requested, "ERROR;DISK;INVALID_RL_SIZE");
       return;
     }
     media_changed(unit, slot, true);

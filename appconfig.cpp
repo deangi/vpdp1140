@@ -67,7 +67,7 @@ static String unquote_config_value(const String& val) {
   return val;
 }
 
-static void config_set_boot_input(AppConfig& cfg, const String& encoded) {
+void config_set_boot_input(AppConfig& cfg, const String& encoded) {
   cfg.boot_input_len = 0;
   String s = unquote_config_value(encoded);
 
@@ -127,7 +127,7 @@ static void config_set_boot_input(AppConfig& cfg, const String& encoded) {
   }
 }
 
-static String escaped_bytes(const uint8_t* bytes, size_t len) {
+String config_escape_bytes(const uint8_t* bytes, size_t len) {
   String out;
   char tmp[6];
   for (size_t i = 0; i < len; i++) {
@@ -199,6 +199,9 @@ void config_apply_compiled_defaults(AppConfig& cfg) {
 
   cfg.diag_pcping_sec = 5;
   cfg.diag_serialdelay_ms = 20;
+  cfg.diag_io_trace   = 0;
+  cfg.diag_clock_trace = 0;
+  cfg.diag_console_trace = 0;
   cfg.diag_trace      = false;
   cfg.v4b_quirks      = true;
   cfg.kwp_enabled     = false;
@@ -260,6 +263,21 @@ static void parse_line(AppConfig& cfg, String& section, const String& raw,
     // the parser; "diag" is the canonical section going forward.
     if      (key == "pcping")     cfg.diag_pcping_sec = val.toInt();
     else if (key == "serialdelay") cfg.diag_serialdelay_ms = val.toInt();
+    else if (key == "io_trace") {
+      long count = val.toInt();
+      cfg.diag_io_trace = count < 0 ? 0
+                        : count > 1000000 ? 1000000 : (int)count;
+    }
+    else if (key == "clock_trace") {
+      long count = val.toInt();
+      cfg.diag_clock_trace = count < 0 ? 0
+                           : count > 1000000 ? 1000000 : (int)count;
+    }
+    else if (key == "console_trace") {
+      long count = val.toInt();
+      cfg.diag_console_trace = count < 0 ? 0
+                             : count > 1000000 ? 1000000 : (int)count;
+    }
     else if (key == "trace")      cfg.diag_trace = truthy(val);
     else if (key == "v4b_quirks") cfg.v4b_quirks = (val.equalsIgnoreCase("true") ||
                                                    val == "1" ||
@@ -436,7 +454,8 @@ bool config_write_default_pdp(const AppConfig& cfg) {
   f.println("[console]");
   f.println("; boot_input is injected into the KL11 input queue after each");
   f.println("; PDP-11 boot/reset. Escapes: \\r \\n \\t \\e \\xHH \\ooo ^C ^[ ^?.");
-  f.printf("boot_input = \"%s\"\r\n", escaped_bytes(cfg.boot_input, cfg.boot_input_len).c_str());
+  f.printf("boot_input = \"%s\"\r\n",
+           config_escape_bytes(cfg.boot_input, cfg.boot_input_len).c_str());
   f.println();
   f.println("[serial1]");
   f.println("; Optional second DL11-compatible TTY at 0176500. The TTY0 VPDP");
@@ -470,8 +489,17 @@ bool config_write_default_pdp(const AppConfig& cfg) {
   f.println(";               buffered host (Arduino IDE Serial Monitor).");
   f.println("; trace       = per-instruction panic trace ring. Expensive:");
   f.println(";               set true only when chasing a HALT/panic.");
+  f.println("; io_trace    = log the next N I/O-page reads/writes, then stop.");
+  f.println(";               0 disables I/O tracing.");
+  f.println("; clock_trace = log the next N KW11-L/KW11-P register and");
+  f.println(";               interrupt events, then stop. 0 disables.");
+  f.println("; console_trace = log the next N characters read from or written");
+  f.println(";                 to the KL11 console, then stop. 0 disables.");
   f.printf("pcping      = %d\r\n", cfg.diag_pcping_sec);
   f.printf("serialdelay = %d\r\n", cfg.diag_serialdelay_ms);
+  f.printf("io_trace    = %d\r\n", cfg.diag_io_trace);
+  f.printf("clock_trace = %d\r\n", cfg.diag_clock_trace);
+  f.printf("console_trace = %d\r\n", cfg.diag_console_trace);
   f.printf("trace       = %s\r\n", cfg.diag_trace ? "true" : "false");
   f.printf("v4b_quirks  = %s\r\n", cfg.v4b_quirks ? "true" : "false");
   f.printf("kwp_enabled = %s\r\n", cfg.kwp_enabled ? "true" : "false");
@@ -627,16 +655,19 @@ void config_print(const AppConfig& cfg) {
   LOG("[telnet]  enabled=%s  port=%d",
       cfg.telnet_enabled ? "true" : "false", cfg.telnet_port);
   LOG("[console] boot_input=\"%s\" (%u bytes)",
-      escaped_bytes(cfg.boot_input, cfg.boot_input_len).c_str(),
+      config_escape_bytes(cfg.boot_input, cfg.boot_input_len).c_str(),
       (unsigned)cfg.boot_input_len);
   LOG("[serial1] enabled=%s  CSR=776500  RX-vector=300  TX-vector=304",
       cfg.serial1_enabled ? "true" : "false");
   LOG("[ftp]     enabled=%s  port=%d  user=\"%s\" (password=%d chars)",
       cfg.ftp_enabled ? "true" : "false", cfg.ftp_port,
       cfg.ftp_user.c_str(), (int)cfg.ftp_password.length());
-  LOG("[diag]    pcping=%d sec%s  serialdelay=%d ms  trace=%s  v4b_quirks=%s  kwp_enabled=%s",
+  LOG("[diag]    pcping=%d sec%s  serialdelay=%d ms  io_trace=%d  clock_trace=%d  console_trace=%d  trace=%s  v4b_quirks=%s  kwp_enabled=%s",
       cfg.diag_pcping_sec, cfg.diag_pcping_sec <= 0 ? " (disabled)" : "",
       cfg.diag_serialdelay_ms,
+      cfg.diag_io_trace,
+      cfg.diag_clock_trace,
+      cfg.diag_console_trace,
       cfg.diag_trace ? "true" : "false",
       cfg.v4b_quirks  ? "true" : "false",
       cfg.kwp_enabled ? "true (V7 mode)" : "false (V4B-safe)");

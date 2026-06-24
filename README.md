@@ -3,7 +3,8 @@
 A **Freenove ESP32-S3 2.8" Display** board turned into a tiny DEC
 PDP-11/40 that boots **V6 Unix** from an SD-card disk image. The console
 appears on the onboard TFT, on Telnet, and on USB-Serial — all three live
-simultaneously. Also boots RT-11 V5, RSTS V4B, RSX-11M V4.0, and XXDP.
+simultaneously. Also boots RT-11 V5, RSTS V4B, RSX-11M V4.0, RSX-11M V4.8
+124KW, and XXDP.
 
 For full operating instructions, SD card setup, configuration-file reference,
 and menu documentation, see the [PDP 11/40 Emulator User Guide](docs/user-manual.md).
@@ -41,6 +42,7 @@ everything else.
 | RT-11 SJ V5           | `rt11v5.dsk` (RK05) | ✅ Boots to . prompt, runs DIR   |
 | RSTS V4B              | `RSTS11v4B.dsk`     |✅ Boots to READY prompt          |
 | RSX-11M V4.0          | RL01/RL02 image      | ✅ Boots successfully            |
+| RSX-11M V4.8          | RL01/RL02 image      | ✅ Boots 124KW mapped system     |
 
 Still testing other operating systems.   I think 211 BSD isn't going to work on the PDP-11/40
 
@@ -152,6 +154,9 @@ enabled = false               ; TT1 file-backed DL11 at 0176500
 [diag]
 pcping      = 5               ; sec between PC dumps; 0 disables
 serialdelay = 20              ; ms gate between bursty input chars
+io_trace    = 0               ; trace next N I/O-page accesses
+clock_trace = 0               ; trace next N clock accesses/IRQs
+console_trace = 0             ; trace next N PDP console characters
 trace       = false           ; true only for panic/HALT diagnosis
 v4b_quirks  = true            ; RSTS V4B / RT-11 / V6 / XXDP
 kwp_enabled = false           ; true for RSTS V7 bring-up
@@ -177,8 +182,8 @@ boot = rk0                    ; or dl0, dl1, dl2, dl3
 The emulator can boot from either controller:
 
 - `boot = dl0` through `boot = dl3` selects the RL11 bootstrap and treats
-  the four disk slots as RL drives `DL0` through `DL3`. RL01 images are
-  approximately 5 MB and RL02 images are approximately 10 MB.
+  the four disk slots as RL drives `DL0` through `DL3`. RL mounts require
+  exact RL01 images of 5,242,880 bytes or exact RL02 images of 10,485,760 bytes.
 - `boot = rk0` selects the RK11 bootstrap. The `rk0` image is mounted in
   host slot 0 in place of `dl0`, so the guest sees it as RK drive `RK0`.
   RK05 images are approximately 2.5 MB; some distributions use paired or
@@ -222,7 +227,7 @@ ESC >>
 
 The PDP-11 continues running and remains connected to the TFT and USB serial.
 Type `exit` to reconnect Telnet to the PDP console. An incomplete escape
-sequence is replayed to the PDP after one second.
+sequence is replayed to the PDP after five seconds.
 
 The shell provides:
 
@@ -238,6 +243,8 @@ drives
 mount <RL0-RL3|RK0|RP0> <path> [ro]
 dismount <RL0-RL3|RK0|RP0>
 create <rk|rl01|rl02> <path>
+set [name=value]
+monitor
 reboot
 help
 exit
@@ -250,6 +257,50 @@ first. `cat` displays at most the first 100 lines and rejects binary files. The
 guest operating system must flush and offline a drive before it is
 dismounted. `create` makes zero-filled RK05 (2,494,464-byte), RL01
 (5,242,880-byte), or RL02 (10,485,760-byte) images.
+RL `mount` accepts only the two exact RL pack sizes: 5,242,880 bytes for RL01
+or 10,485,760 bytes for RL02.
+
+`set` with no arguments displays the runtime-changeable settings. Supported
+assignments are `pcping`, `serialdelay`, `io_trace`, `clock_trace`,
+`console_trace`, `trace`, `title`, and `boot_input`;
+`boot_text` is accepted as an alias for `boot_input`. For example:
+
+```text
+set pcping=1
+set io_trace=100
+set clock_trace=100
+set console_trace=100
+set trace=false
+set boot_input="hello\r"
+```
+
+These changes are not written to `/pdpconfig.ini` and are lost when the ESP32
+restarts. `boot_input` takes effect on the next PDP-11 reboot.
+
+The `monitor` command enters a front-panel-style PDP-11 monitor. Addresses and
+values are octal:
+
+```text
+P                     pause after the current instruction
+S                     execute one instruction and remain paused
+C                     continue execution
+D00100                dump 16 words from physical address 00100
+D00100:00200          dump an inclusive physical address range
+T 1000                trace the next 1000 instructions to USB serial
+W000100=012345        deposit one word in physical RAM
+>                     return to the management shell
+```
+
+`P` and `S` display the PC, R0-R5, SP, PSW, and the address, opcode, and
+disassembly of the next instruction that `S` will execute. Memory dumps contain eight octal
+words and their 16-byte printable ASCII
+representation per line. Examine/deposit commands accept aligned physical RAM
+addresses through `0757776`; the PDP-11 I/O page is deliberately excluded.
+Each range dump is limited to 512 words. Leaving monitor mode does not
+automatically resume a paused CPU; use `C` when execution should continue.
+`T` takes a decimal instruction count; `T 0` cancels an active trace. Trace
+lines are written to USB serial in the same register/opcode format as the
+panic trace, with disassembly appended.
 
 ### Guest-to-emulator control channel
 

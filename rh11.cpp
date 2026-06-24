@@ -35,6 +35,8 @@ static constexpr uint16_t CS1_IE  = 0000100;
 static constexpr uint16_t CS1_RDY = 0000200;
 static constexpr uint16_t CS1_TRE = 0100000;
 
+static constexpr uint16_t CS2_NED = 0010000;
+
 static constexpr uint16_t DS_VV   = 0000100;
 static constexpr uint16_t DS_DRY  = 0000200;
 static constexpr uint16_t DS_DPR  = 0000400;
@@ -115,11 +117,29 @@ static void schedule_done_irq()
     }
 }
 
-static void set_ready_status()
+static int selected_unit()
+{
+    return RHCS2 & 07;
+}
+
+static void update_drive_status()
 {
     RHCS1 |= CS1_RDY;
-    RHDS = DS_VV | DS_DRY | DS_DPR | DS_MOL;
-    if (disk_is_readonly(DRIVE_RP0)) RHDS |= 0004000;
+
+    // This implementation exposes one RP-family drive. Units 1-7 do not
+    // exist and must not inherit RP0's type or online status.
+    if (selected_unit() != 0) {
+        RHCS2 |= CS2_NED;
+        RHDS = 0;
+        return;
+    }
+
+    RHCS2 &= ~CS2_NED;
+    RHDS = DS_DPR;
+    if (attached) {
+        RHDS |= DS_VV | DS_DRY | DS_MOL;
+        if (disk_is_readonly(DRIVE_RP0)) RHDS |= 0004000;
+    }
     if (RHER1 || (RHCS1 & CS1_TRE)) RHDS |= DS_ERR;
 }
 
@@ -127,7 +147,8 @@ static void clear_errors()
 {
     RHER1 = RHER2 = RHER3 = 0;
     RHCS1 &= ~CS1_TRE;
-    RHDS &= ~DS_ERR;
+    RHCS2 &= ~CS2_NED;
+    update_drive_status();
 }
 
 void reset()
@@ -142,7 +163,7 @@ void reset()
     irq_pending = 0;
     irq_trace_left = 24;
     procNS::cancelinterrupt(INTRP);
-    set_ready_status();
+    update_drive_status();
     if (attached) {
         LOG("RH11 RP0 attached as %s (%u bytes)",
             geom.name, (unsigned)disk_size_bytes(DRIVE_RP0));
@@ -152,12 +173,7 @@ void reset()
 void media_changed(bool mounted)
 {
     attached = mounted;
-    if (mounted) {
-        set_ready_status();
-    } else {
-        RHDS = 0;
-        RHCS1 |= CS1_RDY;
-    }
+    update_drive_status();
 }
 
 static uint32_t bus_addr()
@@ -184,10 +200,16 @@ static bool validate_address()
     uint32_t cyl  = RHDC & 01777;
     uint32_t head = (RHDA >> 8) & 037;
     uint32_t sec  = RHDA & 077;
+    if (selected_unit() != 0) {
+        RHCS2 |= CS2_NED;
+        RHCS1 |= CS1_TRE;
+        update_drive_status();
+        return false;
+    }
     if (!attached || cyl >= geom.cylinders || head >= HEADS || sec >= SECS_PER_TRACK) {
         RHER1 |= ER1_AOE;
         RHCS1 |= CS1_TRE;
-        set_ready_status();
+        update_drive_status();
         return false;
     }
     return true;
@@ -229,7 +251,7 @@ static void transfer(bool writing)
 
         if (writing) {
             for (uint32_t i = 0; i < chunk_words; i++) {
-                uint16_t v = dd11::read16(ba + i * 2);
+                uint16_t v = dd11::read16((ba + i * 2) & 0777777u);
                 scratch[i * 2]     = (uint8_t)(v & 0xFF);
                 scratch[i * 2 + 1] = (uint8_t)(v >> 8);
             }
@@ -247,11 +269,11 @@ static void transfer(bool writing)
             for (uint32_t i = 0; i < chunk_words; i++) {
                 uint16_t v = (uint16_t)scratch[i * 2]
                            | ((uint16_t)scratch[i * 2 + 1] << 8);
-                dd11::write16(ba + i * 2, v);
+                dd11::write16((ba + i * 2) & 0777777u, v);
             }
         }
 
-        ba += chunk_bytes;
+        ba = (ba + chunk_bytes) & 0777777u;
         off += chunk_bytes;
         words_left -= chunk_words;
         RHWC = (uint16_t)(RHWC + chunk_words);
@@ -281,8 +303,8 @@ static void execute()
     uint16_t func = RHCS1 & 0000076;
     RHCS1 &= ~CS1_RDY;
 
-    if ((RHCS2 & 07) != 0) {
-        RHER1 |= ER1_ILF;
+    if (selected_unit() != 0) {
+        RHCS2 |= CS2_NED;
         RHCS1 |= CS1_TRE;
     } else {
         switch (func) {
@@ -311,8 +333,8 @@ static void execute()
         }
     }
 
-    set_ready_status();
-    RHAS |= 1;
+    update_drive_status();
+    if (selected_unit() == 0) RHAS |= 1;
     schedule_done_irq();
 }
 
@@ -334,14 +356,16 @@ uint16_t read16(uint32_t a)
     case DEV_RH_BA:  return RHBA;
     case DEV_RH_DA:  return RHDA;
     case DEV_RH_CS2: return RHCS2;
-    case DEV_RH_DS:  return RHDS;
+    case DEV_RH_DS:
+        update_drive_status();
+        return RHDS;
     case DEV_RH_ER1: return RHER1;
     case DEV_RH_AS:  return RHAS;
     case DEV_RH_LA:  return 0;
     case DEV_RH_DB:  return 0;
     case DEV_RH_MR:  return RHM1;
-    case DEV_RH_DT:  return RHDT;
-    case DEV_RH_SN:  return 1;
+    case DEV_RH_DT:  return selected_unit() == 0 ? RHDT : 0;
+    case DEV_RH_SN:  return selected_unit() == 0 ? 1 : 0;
     case DEV_RH_OF:  return RHOFF;
     case DEV_RH_DC:  return RHDC;
     case DEV_RH_CC:  return RHDC;
@@ -364,7 +388,7 @@ void write16(uint32_t a, uint16_t v)
         RHCS1 = (RHCS1 & (CS1_RDY | CS1_TRE)) | (v & ~(CS1_RDY | CS1_TRE));
         if (v & CS1_GO) execute();
         else {
-            set_ready_status();
+            update_drive_status();
             schedule_done_irq();
         }
         break;
@@ -377,6 +401,7 @@ void write16(uint32_t a, uint16_t v)
             break;
         }
         RHCS2 = v & 017;
+        update_drive_status();
         break;
     case DEV_RH_AS:  RHAS &= ~v; break; // write-one-to-clear attention bits
     case DEV_RH_MR:  RHM1 = v; break;

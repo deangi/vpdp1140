@@ -45,6 +45,7 @@
 #ifdef PS
 #undef PS
 #endif
+#include "appconfig.h"
 #include "platform.h"
 
 #define procNS kd11
@@ -79,6 +80,35 @@ static uint16_t irq_cs_snap  = 0;       // RKCS snapshot when op finished
 static constexpr bool IRQ_TRACE = false;
 static int      irq_trace_left = 24;
 
+static int selected_drive()
+{
+    return (RKDA >> 13) & 7;
+}
+
+static bool drive_exists(int drive)
+{
+    // RK and RL currently share slots 0-3. Only RK0 exists, and slot 0 is
+    // RK media only while the emulator is configured to boot through RK11.
+    return cfg.boot_kind == AppConfig::BK_RK && drive == 0;
+}
+
+static bool drive_attached(int drive)
+{
+    return drive_exists(drive) && attached_drives[drive];
+}
+
+static void update_drive_status()
+{
+    int drive = selected_drive();
+    RKDS = 0;
+    if (!drive_exists(drive)) return;
+
+    // RK05 identification and sector-counter-ok remain visible with no pack;
+    // drive-ready is asserted only when an RK image is actually mounted.
+    RKDS = (1 << 11) | (1 << 6);
+    if (drive_attached(drive)) RKDS |= (1 << 7);
+}
+
 static void trace_irq(const char *event, uint16_t value)
 {
     if (IRQ_TRACE && irq_trace_left > 0) {
@@ -91,9 +121,6 @@ static void trace_irq(const char *event, uint16_t value)
 
 void reset()
 {
-    // RKDS: bit 11 = RK05 ident, bit 7 = DRDY (drive ready), bit 6 = SOK.
-    // We claim "drive present and good" so the boot ROM finds unit 0.
-    RKDS = (1 << 11) | (1 << 7) | (1 << 6);
     RKER = 0;
     RKCS = 1 << 7;   // CRDY (controller ready)
     RKWC = 0;
@@ -103,17 +130,15 @@ void reset()
     irq_trace_left = 24;
     procNS::cancelinterrupt(INTRK);
     for (int i = 0; i < NUM_RK_DRIVES; i++)
-        attached_drives[i] = disk_is_mounted(i);
+        attached_drives[i] = drive_exists(i) && disk_is_mounted(i);
+    update_drive_status();
 }
 
 void media_changed(int unit, bool mounted)
 {
     if (unit < 0 || unit >= (int)NUM_RK_DRIVES) return;
-    attached_drives[unit] = mounted;
-    if (!mounted && (((RKDA >> 13) & 7) == unit))
-        RKDS &= ~(1 << 7);
-    else if (mounted)
-        RKDS |= (1 << 7);
+    attached_drives[unit] = drive_exists(unit) && mounted;
+    update_drive_status();
 }
 
 static uint32_t da_to_offset(uint16_t da)
@@ -161,11 +186,18 @@ static void execute()
 
     RKER = 0;
 
-    switch (func) {
-    case 0:  // CONTROL RESET
+    if (func == 0) {  // CONTROL RESET is controller-wide; no drive required.
         reset();
         return;
+    }
 
+    if (!drive_attached(drv)) {
+        Serial.printf("[vpdp1140] RK11 %s drv=%d -> drive not attached\r\n",
+                      func_name(func), drv);
+        RKER |= RKNXD;
+        RKCS |= 0x8000;
+    } else {
+        switch (func) {
     case 6:  // DRIVE RESET
         RKER = 0;
         break;
@@ -180,13 +212,6 @@ static void execute()
 
     case 1:  // WRITE
     case 2: {// READ
-        if (drv >= (int)NUM_RK_DRIVES || !attached_drives[drv]) {
-            Serial.printf("[vpdp1140] RK11 %s drv=%d -> drive not attached\r\n",
-                          func_name(func), drv);
-            RKER |= RKNXD;
-            RKCS |= 0x8000;       // composite error
-            break;
-        }
         uint32_t cyl = (RKDA >> 5) & 0xFF;
         if (cyl > MAX_CYLINDER) {
             RKER |= RKNXC;
@@ -214,7 +239,7 @@ static void execute()
 
             if (writing) {
                 for (uint32_t i = 0; i < chunk_words; i++) {
-                    uint16_t v = dd11::read16(ba + i * 2);
+                    uint16_t v = dd11::read16((ba + i * 2) & 0777777u);
                     scratch[i * 2]     = (uint8_t)(v & 0xFF);
                     scratch[i * 2 + 1] = (uint8_t)((v >> 8) & 0xFF);
                 }
@@ -234,11 +259,11 @@ static void execute()
                 for (uint32_t i = 0; i < chunk_words; i++) {
                     uint16_t v = (uint16_t)scratch[i * 2]
                                | ((uint16_t)scratch[i * 2 + 1] << 8);
-                    dd11::write16(ba + i * 2, v);
+                    dd11::write16((ba + i * 2) & 0777777u, v);
                 }
             }
 
-            ba         += chunk_bytes;
+            ba          = (ba + chunk_bytes) & 0777777u;
             off        += chunk_bytes;
             words_left -= chunk_words;
             RKWC       = (uint16_t)(RKWC + chunk_words);
@@ -268,13 +293,15 @@ static void execute()
         }
         break;
     }
+        default:
+            break;
+        }
     }
 
-    // Op complete: controller ready (RKCS bit 7) and drive ready
-    // (RKDS bit 7). The RK0 bootrom polls TSTB (R1) (= RKCS low byte
-    // sign bit) waiting for CRDY before proceeding.
+    // Op complete: assert controller ready. Drive-ready is refreshed from
+    // the selected unit's actual attachment state.
     RKCS |= (1 << 7);
-    RKDS |= (1 << 7);
+    update_drive_status();
 
     // Fire the RK11 done-interrupt if Interrupt Enable (RKCS bit 6) is
     // set, but DEFERRED: schedule it to land after the next guest
@@ -309,7 +336,9 @@ void tick()
 uint16_t read16(uint32_t a)
 {
     switch (a) {
-    case DEV_RK_DS:  return RKDS;
+    case DEV_RK_DS:
+        update_drive_status();
+        return RKDS;
     case DEV_RK_ER:  return RKER;
     case DEV_RK_CS:  return RKCS;
     case DEV_RK_WC:  return RKWC;
@@ -347,7 +376,10 @@ void write16(uint32_t a, uint16_t v)
 
     case DEV_RK_WC:  RKWC = v; break;
     case DEV_RK_BA:  RKBA = v; break;
-    case DEV_RK_DA:  RKDA = v; break;
+    case DEV_RK_DA:
+        RKDA = v;
+        update_drive_status();
+        break;
     case DEV_RK_DB:  break;
     case DEV_RK_MR:  break;
     }

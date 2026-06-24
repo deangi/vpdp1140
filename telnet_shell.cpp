@@ -3,8 +3,12 @@
 #include "SD_FTP_Server/src/SD_FTP_Server.h"
 #include "appconfig.h"
 #include "disk.h"
+#include "dd11.h"
 #include "emu_control.h"
 #include "fifo.h"
+#include "cpu_pdp11.h"
+#include "kl11.h"
+#include "kw11.h"
 #include "platform.h"
 #include "rh11.h"
 #include "rk11.h"
@@ -15,6 +19,7 @@
 #include <SD_MMC.h>
 #include "esp_attr.h"
 #include <stdarg.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -33,6 +38,7 @@ EXT_RAM_BSS_ATTR static uint8_t g_output_storage[SHELL_OUTPUT_BYTES];
 EXT_RAM_BSS_ATTR static uint8_t g_file_buffer[4096];
 static Fifo g_output;
 static bool g_initialized = false;
+static bool g_monitor_mode = false;
 static char g_cwd[SHELL_PATH_MAX] = "/";
 
 static void output_char(uint8_t value) {
@@ -71,7 +77,10 @@ static void output_printf(const char* format, ...) {
 }
 
 static void prompt() {
-  output_printf("vpdp:%s> ", g_cwd);
+  if (g_monitor_mode)
+    output_text("monitor> ");
+  else
+    output_printf("vpdp:%s> ", g_cwd);
 }
 
 static bool queue_command(const char* command) {
@@ -104,12 +113,14 @@ void telnet_shell_enter() {
   g_command_tail = g_command_head;
   g_output.clear();
   strcpy(g_cwd, "/");
+  g_monitor_mode = false;
   g_active = true;
   LOG("telnet shell: entered by %s", telnet_client_ip());
 }
 
 void telnet_shell_disconnect() {
   g_active = false;
+  g_monitor_mode = false;
   g_input_len = 0;
   g_command_tail = g_command_head;
   if (g_initialized) g_output.clear();
@@ -228,6 +239,165 @@ static int split_words(char* line, char* words[], int maximum) {
   return count;
 }
 
+static char* trim_in_place(char* text) {
+  while (*text == ' ' || *text == '\t') text++;
+  char* end = text + strlen(text);
+  while (end > text && (end[-1] == ' ' || end[-1] == '\t')) end--;
+  *end = 0;
+  return text;
+}
+
+static bool parse_bool_value(const char* value, bool* result) {
+  if (!value || !result) return false;
+  if (!strcasecmp(value, "true") || !strcasecmp(value, "yes") ||
+      !strcasecmp(value, "on") || !strcmp(value, "1")) {
+    *result = true;
+    return true;
+  }
+  if (!strcasecmp(value, "false") || !strcasecmp(value, "no") ||
+      !strcasecmp(value, "off") || !strcmp(value, "0")) {
+    *result = false;
+    return true;
+  }
+  return false;
+}
+
+static bool parse_int_value(const char* value, int minimum, int maximum,
+                            int* result) {
+  if (!value || !*value || !result) return false;
+  char* end = nullptr;
+  long parsed = strtol(value, &end, 10);
+  while (end && (*end == ' ' || *end == '\t')) end++;
+  if (!end || *end || parsed < minimum || parsed > maximum) return false;
+  *result = (int)parsed;
+  return true;
+}
+
+static String unquote_shell_value(const char* value) {
+  String result = value ? value : "";
+  if (result.length() >= 2) {
+    char quote = result[0];
+    if ((quote == '"' || quote == '\'') &&
+        result[result.length() - 1] == quote)
+      result = result.substring(1, result.length() - 1);
+  }
+  return result;
+}
+
+static void show_runtime_settings() {
+  output_printf("pcping=%d\r\n", cfg.diag_pcping_sec);
+  output_printf("serialdelay=%d\r\n", cfg.diag_serialdelay_ms);
+  output_printf("io_trace=%u\r\n",
+                (unsigned)dd11::io_trace_remaining());
+  output_printf("clock_trace=%u\r\n",
+                (unsigned)kw11::clock_trace_remaining());
+  output_printf("console_trace=%u\r\n",
+                (unsigned)kl11::console_trace_remaining());
+  output_printf("trace=%s\r\n", cfg.diag_trace ? "true" : "false");
+  output_printf("title=\"%s\"\r\n", cfg.title.c_str());
+  output_printf("boot_input=\"%s\"\r\n",
+                config_escape_bytes(cfg.boot_input,
+                                    cfg.boot_input_len).c_str());
+}
+
+static void command_set(char* arguments) {
+  char* assignment = trim_in_place(arguments);
+  if (!*assignment) {
+    show_runtime_settings();
+    return;
+  }
+  char* equals = strchr(assignment, '=');
+  if (!equals) {
+    output_text("usage: set name=value\r\n");
+    return;
+  }
+  *equals = 0;
+  char* name = trim_in_place(assignment);
+  char* value = trim_in_place(equals + 1);
+
+  if (!strcasecmp(name, "pcping")) {
+    int parsed;
+    if (!parse_int_value(value, 0, 86400, &parsed)) {
+      output_text("error: pcping must be 0..86400 seconds\r\n");
+      return;
+    }
+    cfg.diag_pcping_sec = parsed;
+    output_printf("pcping=%d (runtime only)\r\n", parsed);
+    return;
+  }
+  if (!strcasecmp(name, "serialdelay")) {
+    int parsed;
+    if (!parse_int_value(value, 0, 10000, &parsed)) {
+      output_text("error: serialdelay must be 0..10000 ms\r\n");
+      return;
+    }
+    cfg.diag_serialdelay_ms = parsed;
+    kl11::serial_in_delay_ms = (uint32_t)parsed;
+    output_printf("serialdelay=%d (runtime only)\r\n", parsed);
+    return;
+  }
+  if (!strcasecmp(name, "io_trace")) {
+    int parsed;
+    if (!parse_int_value(value, 0, 1000000, &parsed)) {
+      output_text("error: io_trace must be 0..1000000 accesses\r\n");
+      return;
+    }
+    cfg.diag_io_trace = parsed;
+    dd11::set_io_trace((uint32_t)parsed);
+    output_printf("io_trace=%d (runtime only)\r\n", parsed);
+    return;
+  }
+  if (!strcasecmp(name, "clock_trace")) {
+    int parsed;
+    if (!parse_int_value(value, 0, 1000000, &parsed)) {
+      output_text("error: clock_trace must be 0..1000000 events\r\n");
+      return;
+    }
+    cfg.diag_clock_trace = parsed;
+    kw11::set_clock_trace((uint32_t)parsed);
+    output_printf("clock_trace=%d (runtime only)\r\n", parsed);
+    return;
+  }
+  if (!strcasecmp(name, "console_trace")) {
+    int parsed;
+    if (!parse_int_value(value, 0, 1000000, &parsed)) {
+      output_text("error: console_trace must be 0..1000000 characters\r\n");
+      return;
+    }
+    cfg.diag_console_trace = parsed;
+    kl11::set_console_trace((uint32_t)parsed);
+    output_printf("console_trace=%d (runtime only)\r\n", parsed);
+    return;
+  }
+  if (!strcasecmp(name, "trace")) {
+    bool parsed;
+    if (!parse_bool_value(value, &parsed)) {
+      output_text("error: trace must be true or false\r\n");
+      return;
+    }
+    cfg.diag_trace = parsed;
+    cpu_set_trace(parsed);
+    output_printf("trace=%s (runtime only)\r\n",
+                  parsed ? "true" : "false");
+    return;
+  }
+  if (!strcasecmp(name, "title")) {
+    cfg.title = unquote_shell_value(value);
+    output_printf("title=\"%s\" (runtime only)\r\n", cfg.title.c_str());
+    return;
+  }
+  if (!strcasecmp(name, "boot_input") ||
+      !strcasecmp(name, "boot_text")) {
+    config_set_boot_input(cfg, String(value));
+    output_printf("boot_input=\"%s\" (%u bytes; next PDP reboot, runtime only)\r\n",
+                  config_escape_bytes(cfg.boot_input,
+                                      cfg.boot_input_len).c_str(),
+                  (unsigned)cfg.boot_input_len);
+    return;
+  }
+  output_printf("error: setting is not runtime-changeable: %s\r\n", name);
+}
+
 static void command_help() {
   output_text(
       "File commands:\r\n"
@@ -243,8 +413,203 @@ static void command_help() {
       "  mount <unit> <path> [ro]    mount RL0-RL3, RK0, or RP0\r\n"
       "  dismount <unit>             dismount a drive\r\n"
       "  create <rk|rl01|rl02> <path> create an empty disk image\r\n"
+      "  set [name=value]            show/change runtime settings\r\n"
+      "  monitor                     enter PDP-11 front-panel monitor\r\n"
       "  reboot                      cold reboot the PDP-11\r\n"
       "  exit                        reconnect Telnet to the PDP console\r\n");
+}
+
+static void monitor_help() {
+  output_text(
+      "PDP-11 monitor commands (octal addresses and values):\r\n"
+      "  P                  pause after the current instruction\r\n"
+      "  S                  execute one instruction and remain paused\r\n"
+      "  C                  continue execution\r\n"
+      "  D00100             dump 16 words starting at 00100\r\n"
+      "  D00100:00200       dump an inclusive address range\r\n"
+      "  T 1000             trace the next 1000 instructions to USB serial\r\n"
+      "  W000100=012345     deposit one word in physical RAM\r\n"
+      "  >                  return to the management shell\r\n"
+      "  ?                  show this help\r\n");
+}
+
+static void monitor_state() {
+  uint16_t next_address = cpu_reg16(7);
+  uint16_t next_opcode = 0;
+  char disassembly[128];
+  bool have_next = cpu_next_instruction(&next_address, &next_opcode);
+  bool have_disassembly = cpu_disassemble_next(disassembly,
+                                                sizeof(disassembly));
+  output_printf(
+      "state: PC=%06o R0=%06o R1=%06o R2=%06o R3=%06o "
+      "R4=%06o R5=%06o SP=%06o PS=%06o",
+      (unsigned)cpu_reg16(7),
+      (unsigned)cpu_reg16(0), (unsigned)cpu_reg16(1),
+      (unsigned)cpu_reg16(2), (unsigned)cpu_reg16(3),
+      (unsigned)cpu_reg16(4), (unsigned)cpu_reg16(5),
+      (unsigned)cpu_reg16(6), (unsigned)cpu_psw());
+  if (have_next)
+    output_printf(" NEXT=%06o:%06o  %s\r\n",
+                  (unsigned)next_address, (unsigned)next_opcode,
+                  have_disassembly ? disassembly : "???");
+  else
+    output_text(" NEXT=unavailable\r\n");
+}
+
+static bool parse_monitor_octal(const char* text, uint32_t maximum,
+                                uint32_t* result) {
+  if (!text || !*text || !result) return false;
+  char* end = nullptr;
+  unsigned long value = strtoul(text, &end, 8);
+  if (!end || *end || value > maximum) return false;
+  *result = (uint32_t)value;
+  return true;
+}
+
+static void monitor_dump(const char* argument) {
+  static constexpr uint32_t LAST_RAM_WORD = 0757776u;
+  static constexpr uint32_t MAX_DUMP_WORDS = 512;
+
+  char range[64];
+  strncpy(range, argument ? argument : "", sizeof(range) - 1);
+  range[sizeof(range) - 1] = 0;
+  char* separator = strchr(range, ':');
+  if (separator) *separator++ = 0;
+
+  uint32_t first = 0;
+  uint32_t last = 0;
+  if (!parse_monitor_octal(trim_in_place(range), LAST_RAM_WORD, &first) ||
+      (first & 1)) {
+    output_text("error: invalid even physical RAM address\r\n");
+    return;
+  }
+  if (separator) {
+    if (!parse_monitor_octal(trim_in_place(separator), LAST_RAM_WORD, &last) ||
+        (last & 1) || last < first) {
+      output_text("error: invalid dump range\r\n");
+      return;
+    }
+  } else {
+    last = first + 30;
+    if (last > LAST_RAM_WORD) last = LAST_RAM_WORD;
+  }
+
+  uint32_t words = ((last - first) / 2) + 1;
+  if (words > MAX_DUMP_WORDS) {
+    output_printf("error: dump is limited to %u words per command\r\n",
+                  (unsigned)MAX_DUMP_WORDS);
+    return;
+  }
+
+  for (uint32_t address = first; address <= last;) {
+    uint16_t values[8] = {};
+    unsigned count = 0;
+    uint32_t line_address = address;
+    while (count < 8 && address <= last) {
+      if (!cpu_read_physical_word(address, &values[count])) {
+        output_text("error: memory examine failed\r\n");
+        return;
+      }
+      count++;
+      address += 2;
+    }
+
+    output_printf("%06o:", (unsigned)line_address);
+    for (unsigned i = 0; i < 8; i++) {
+      if (i < count)
+        output_printf(" %06o", (unsigned)values[i]);
+      else
+        output_text("       ");
+    }
+    output_text("  ");
+    for (unsigned i = 0; i < count; i++) {
+      uint8_t low = (uint8_t)(values[i] & 0xff);
+      uint8_t high = (uint8_t)(values[i] >> 8);
+      output_char(low >= 0x20 && low <= 0x7e ? low : ' ');
+      output_char(high >= 0x20 && high <= 0x7e ? high : ' ');
+    }
+    for (unsigned i = count; i < 8; i++) output_text("  ");
+    output_text("\r\n");
+  }
+}
+
+static void monitor_write(const char* argument) {
+  char assignment[64];
+  strncpy(assignment, argument ? argument : "", sizeof(assignment) - 1);
+  assignment[sizeof(assignment) - 1] = 0;
+  char* equals = strchr(assignment, '=');
+  if (!equals) {
+    output_text("usage: W<address>=<word>\r\n");
+    return;
+  }
+  *equals++ = 0;
+
+  uint32_t address = 0;
+  uint32_t value = 0;
+  if (!parse_monitor_octal(trim_in_place(assignment), 0757776u, &address) ||
+      (address & 1) ||
+      !parse_monitor_octal(trim_in_place(equals), 0177777u, &value)) {
+    output_text("error: invalid octal address or word\r\n");
+    return;
+  }
+  if (!cpu_write_physical_word(address, (uint16_t)value)) {
+    output_text("error: memory deposit failed\r\n");
+    return;
+  }
+  output_printf("%06o=%06o\r\n", (unsigned)address, (unsigned)value);
+}
+
+static void monitor_trace(const char* argument) {
+  char text[32];
+  strncpy(text, argument ? argument : "", sizeof(text) - 1);
+  text[sizeof(text) - 1] = 0;
+  char* count_text = trim_in_place(text);
+  char* end = nullptr;
+  unsigned long count = strtoul(count_text, &end, 10);
+  while (end && (*end == ' ' || *end == '\t')) end++;
+  if (!count_text[0] || !end || *end || count > 1000000UL) {
+    output_text("usage: T <decimal-instruction-count 0..1000000>\r\n");
+    return;
+  }
+  cpu_monitor_trace_next((uint32_t)count);
+  output_printf("instruction trace count set to %lu; output goes to USB serial\r\n",
+                count);
+}
+
+static void execute_monitor_command(char* line) {
+  char* command = trim_in_place(line);
+  if (!*command) {
+    prompt();
+    return;
+  }
+  if (!strcmp(command, ">")) {
+    g_monitor_mode = false;
+    output_text("Returned to management shell.\r\n");
+    prompt();
+    return;
+  }
+  if (!strcasecmp(command, "?") || !strcasecmp(command, "help")) {
+    monitor_help();
+  } else if (!strcasecmp(command, "P")) {
+    cpu_monitor_pause();
+    monitor_state();
+  } else if (!strcasecmp(command, "S")) {
+    if (cpu_monitor_step() == 0)
+      output_text("error: CPU did not execute an instruction\r\n");
+    monitor_state();
+  } else if (!strcasecmp(command, "C")) {
+    cpu_monitor_continue();
+    output_text("CPU running\r\n");
+  } else if (command[0] == 'D' || command[0] == 'd') {
+    monitor_dump(command + 1);
+  } else if (command[0] == 'T' || command[0] == 't') {
+    monitor_trace(command + 1);
+  } else if (command[0] == 'W' || command[0] == 'w') {
+    monitor_write(command + 1);
+  } else {
+    output_text("unknown monitor command (type ?)\r\n");
+  }
+  prompt();
 }
 
 static void command_ls(const char* argument) {
@@ -496,11 +861,23 @@ static void command_drives() {
       output_printf("%-3s  empty\r\n", slot_label(slot));
       continue;
     }
-    output_printf("%-3s  %s  %lu bytes  %s\r\n",
-                  slot_label(slot), disk_path(slot),
-                  (unsigned long)disk_size_bytes(slot),
-                  disk_is_readonly(slot) ? "read-only" : "read-write");
+    if (slot != DRIVE_RP0 && !(slot == DRIVE_A && cfg.boot_kind == AppConfig::BK_RK)) {
+      output_printf("%-3s  %s  %lu bytes  %s  %s\r\n",
+                    slot_label(slot), disk_path(slot),
+                    (unsigned long)disk_size_bytes(slot),
+                    rl11::mounted_media_type(slot),
+                    disk_is_readonly(slot) ? "read-only" : "read-write");
+    } else {
+      output_printf("%-3s  %s  %lu bytes  %s\r\n",
+                    slot_label(slot), disk_path(slot),
+                    (unsigned long)disk_size_bytes(slot),
+                    disk_is_readonly(slot) ? "read-only" : "read-write");
+    }
   }
+}
+
+static bool unit_is_rl(const char* unit) {
+  return unit && (!strncasecmp(unit, "RL", 2) || !strncasecmp(unit, "DL", 2));
 }
 
 static int unit_slot(const char* unit) {
@@ -548,6 +925,16 @@ static void command_mount(const char* unit, const char* path_arg,
   if (!disk_mount_mode(slot, path, readonly)) {
     output_printf("error: mount failed: %s: %s\r\n", path,
                   disk_last_error()[0] ? disk_last_error() : "unknown error");
+    return;
+  }
+  if (unit_is_rl(unit) && !rl11::validate_mounted_media(slot)) {
+    uint32_t bytes = disk_size_bytes(slot);
+    disk_dismount(slot);
+    rl11::media_changed(slot, false);
+    output_printf("error: invalid RL image size: %lu bytes; expected RL01=%lu or RL02=%lu\r\n",
+                  (unsigned long)bytes,
+                  (unsigned long)rl11::RL01_IMAGE_BYTES,
+                  (unsigned long)rl11::RL02_IMAGE_BYTES);
     return;
   }
   notify_media(slot, true);
@@ -623,8 +1010,20 @@ static void command_create(const char* type, const char* path_arg) {
 }
 
 static void execute_command(char* line) {
+  if (g_monitor_mode) {
+    execute_monitor_command(line);
+    return;
+  }
+  char* command_start = trim_in_place(line);
+  if (!strncasecmp(command_start, "set", 3) &&
+      (command_start[3] == 0 || command_start[3] == ' ' ||
+       command_start[3] == '\t')) {
+    command_set(command_start + 3);
+    prompt();
+    return;
+  }
   char* words[8];
-  int count = split_words(line, words, 8);
+  int count = split_words(command_start, words, 8);
   if (count == 0) {
     prompt();
     return;
@@ -659,7 +1058,12 @@ static void execute_command(char* line) {
   else if (!strcasecmp(words[0], "create"))
     command_create(count > 1 ? words[1] : nullptr,
                    count > 2 ? words[2] : nullptr);
-  else if (!strcasecmp(words[0], "reboot")) {
+  else if (!strcasecmp(words[0], "monitor")) {
+    g_monitor_mode = true;
+    output_printf("PDP-11 monitor; CPU is currently %s.\r\n",
+                  cpu_monitor_paused() ? "paused" : "running");
+    monitor_help();
+  } else if (!strcasecmp(words[0], "reboot")) {
     if (emu_control::submit("PDP;REBOOT"))
       output_text("PDP-11 cold reboot scheduled\r\n");
     else

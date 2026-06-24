@@ -18,11 +18,18 @@ namespace rl11 {
 
 extern bool attached[4];
 
+static constexpr uint32_t RL01_IMAGE_BYTES = 5242880u;
+static constexpr uint32_t RL02_IMAGE_BYTES = 10485760u;
+
 void     reset();
 void     tick();
 uint16_t read16(uint32_t a);
 void     write16(uint32_t a, uint16_t v);
 void     media_changed(int unit, bool mounted);
+bool     valid_image_size(uint32_t bytes);
+bool     validate_mounted_media(int unit);
+const char* image_type_name(uint32_t bytes);
+const char* mounted_media_type(int unit);
 
 };
 

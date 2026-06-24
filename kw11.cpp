@@ -38,6 +38,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "kd11.h"  // 11/40
 #include "pdp1140.h"
 #include "sam11_platform.h"
+#include "platform.h"
 
 #define LKS_COMPROMISE 100  // factor to compromise the ticks by, 0 == disable. Higher number or disabled is more accurate date/time in OS, but slows down processor speed
 
@@ -58,6 +59,37 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace kw11 {
 
 uint16_t LKS;
+static uint32_t s_clock_trace_count = 0;
+
+void set_clock_trace(uint32_t count)
+{
+    s_clock_trace_count = count;
+}
+
+uint32_t clock_trace_remaining()
+{
+    return s_clock_trace_count;
+}
+
+void trace_access(const char* device, const char* operation,
+                  uint32_t address, uint16_t value)
+{
+    if (s_clock_trace_count == 0) return;
+    s_clock_trace_count--;
+    LOG("CLOCK %s %s @ %06o val=%06o PC=%06o remaining=%u",
+        device, operation, (unsigned)address, (unsigned)value,
+        (unsigned)procNS::curPC, (unsigned)s_clock_trace_count);
+}
+
+void trace_interrupt(const char* device, const char* event,
+                     uint16_t vector, uint8_t priority)
+{
+    if (s_clock_trace_count == 0) return;
+    s_clock_trace_count--;
+    LOG("CLOCK %s IRQ %s vec=%03o BR%u PC=%06o remaining=%u",
+        device, event, (unsigned)vector, (unsigned)priority,
+        (unsigned)procNS::curPC, (unsigned)s_clock_trace_count);
+}
 
 #if LKS_ACC == LKS_SHIFT_TICK
 uint16_t time;
@@ -111,6 +143,7 @@ void tick()
         LKS |= (1 << 7);
         if (LKS & (1 << 6))
         {
+            trace_interrupt("KW11-L", "request", INTCLOCK, 6);
             procNS::interrupt(INTCLOCK, 6);
         }
     }

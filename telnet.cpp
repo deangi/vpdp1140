@@ -50,6 +50,7 @@ static TelnetRxState g_rx_state = RX_DATA;
 static bool g_rx_after_cr = false;
 static uint8_t g_shell_escape_pos = 0;
 static uint32_t g_shell_escape_ms = 0;
+static constexpr uint32_t SHELL_ESCAPE_TIMEOUT_MS = 5000;
 
 static void reset_rx_parser() {
   g_rx_state = RX_DATA;
@@ -162,7 +163,8 @@ static void route_console_input(uint8_t c) {
 
 static void expire_shell_escape() {
   if (!g_shell_escape_pos ||
-      (uint32_t)(millis() - g_shell_escape_ms) < 1000) return;
+      (uint32_t)(millis() - g_shell_escape_ms) <
+          SHELL_ESCAPE_TIMEOUT_MS) return;
   g_telnet_in.push(0x1b);
   if (g_shell_escape_pos == 2) g_telnet_in.push('>');
   g_shell_escape_pos = 0;
@@ -241,8 +243,11 @@ void telnet_poll() {
   }
 
   if (g_client && g_client.connected()) {
-    expire_shell_escape();
+    // Drain and parse the socket before considering a partial shell escape
+    // expired. This parser runs entirely on the core-0 network task and is
+    // independent of how quickly the PDP-11 consumes its input FIFO.
     drain_rx();
+    expire_shell_escape();
     const uint8_t* shell_data;
     size_t shell_bytes;
     while ((shell_bytes = telnet_shell_output_peek(&shell_data)) > 0) {

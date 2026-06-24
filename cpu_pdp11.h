@@ -43,6 +43,15 @@ uint32_t cpu_run(uint32_t max_cycles);
 // Convenience: stop the CPU loop. (Sets a flag the next cpu_run() reads.)
 void cpu_request_halt();
 
+// Front-panel-style monitor control. Pause takes effect between instructions.
+// A monitor step executes exactly one instruction and leaves the CPU paused.
+void cpu_monitor_pause();
+void cpu_monitor_continue();
+bool cpu_monitor_paused();
+uint32_t cpu_monitor_step();
+void cpu_monitor_trace_next(uint32_t count);
+uint32_t cpu_monitor_trace_remaining();
+
 // Memory + register accessors --------------------------------------------
 
 uint8_t* cpu_mem();                 // base of the 256 KiB block (PSRAM); NULL until cpu_init()
@@ -54,6 +63,16 @@ uint16_t cpu_reg16(int idx);
 uint16_t cpu_pc();                  // == cpu_reg16(7)
 uint16_t cpu_psw();                 // processor status word
 uint32_t cpu_inst_count();
+
+// Return the virtual PC and opcode that the next CPU step will fetch.
+bool cpu_next_instruction(uint16_t* address, uint16_t* opcode);
+bool cpu_disassemble_next(char* buffer, size_t size);
+
+// Examine/deposit an aligned word in 18-bit physical RAM. The I/O page is
+// intentionally excluded so monitor commands cannot accidentally operate
+// devices or trigger a bus-error trap outside the CPU execution context.
+bool cpu_read_physical_word(uint32_t address, uint16_t* value);
+bool cpu_write_physical_word(uint32_t address, uint16_t value);
 
 // Manually set PC - used by test rigs and to vector the CPU at a bootstrap
 // loaded into RAM. (m0 stub: no-op.)

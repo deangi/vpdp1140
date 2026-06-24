@@ -40,6 +40,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace kw11 {
 
 extern uint16_t LKS;
+void set_clock_trace(uint32_t count);
+uint32_t clock_trace_remaining();
+void trace_access(const char* device, const char* operation,
+                  uint32_t address, uint16_t value);
+void trace_interrupt(const char* device, const char* event,
+                     uint16_t vector, uint8_t priority);
 void reset();
 void tick();
 };  // namespace kw11

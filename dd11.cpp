@@ -71,8 +71,31 @@ namespace dd11 {
 // XXDP / RT-11 work out of the box; vpdp1140.ino flips it from
 // pdpconfig.ini [diag] v4b_quirks at boot.
 bool v4b_quirks_enabled = true;
+static uint32_t io_trace_count = 0;
 
 static constexpr bool DD11_TRACE_EXPECTED_BUS_PROBES = false;
+static uint16_t read16_impl(uint32_t a);
+static void write16_impl(uint32_t a, uint16_t v);
+
+void set_io_trace(uint32_t count)
+{
+    io_trace_count = count;
+}
+
+uint32_t io_trace_remaining()
+{
+    return io_trace_count;
+}
+
+static void trace_io(const char* operation, uint32_t address, uint16_t value)
+{
+    if (io_trace_count == 0 || address < MAX_RAM_ADDRESS)
+        return;
+    io_trace_count--;
+    LOG("I/O %s @ %06o val=%06o PC=%06o remaining=%u",
+        operation, (unsigned)address, (unsigned)value,
+        (unsigned)procNS::curPC, (unsigned)io_trace_count);
+}
 
 static bool quiet_expected_probe(const uint32_t a)
 {
@@ -111,15 +134,17 @@ uint16_t read8(const uint32_t a)
         return ms11::read8(a);
     }
 #endif
-    if (a % 2 != 0)
-    {
-        return (read16(a & ~1) >> 8) & 0xFF;
-    }
-    return read16(a & ~1) & 0xFF;
+    uint16_t word = read16_impl(a & ~1);
+    uint16_t value = (a % 2 != 0) ? ((word >> 8) & 0xFF) : (word & 0xFF);
+    trace_io("READ8 ", a, value);
+    return value;
 }
 
 void write8(const uint32_t a, const uint16_t v)
 {
+    if (a >= MAX_RAM_ADDRESS)
+        trace_io("WRITE8", a, v & 0xFF);
+
     // The KW11-P does not support byte writes. In particular, do not use
     // the generic read/modify/write path because reading its CSR acknowledges
     // DONE and clears the pending interrupt.
@@ -136,15 +161,17 @@ void write8(const uint32_t a, const uint16_t v)
 #endif
     if (a % 2 != 0)
     {
-        write16(a & ~1, (read16(a & ~1) & 0xFF) | ((v & 0xFF) << 8));
+        write16_impl(a & ~1,
+                     (read16_impl(a & ~1) & 0xFF) | ((v & 0xFF) << 8));
     }
     else
     {
-        write16(a & ~1, (read16(a) & 0xFF00) | (v & 0xFF));
+        write16_impl(a & ~1,
+                     (read16_impl(a) & 0xFF00) | (v & 0xFF));
     }
 }
 
-void write16(uint32_t a, uint16_t v)
+static void write16_impl(uint32_t a, uint16_t v)
 {
     if (a % 2 != 0)
     {
@@ -262,6 +289,7 @@ void write16(uint32_t a, uint16_t v)
 #endif
 
     case DEV_KW_LKS:
+        kw11::trace_access("KW11-L", "WRITE16", a, v);
         kw11::LKS = v;
         return;
 
@@ -439,7 +467,13 @@ void write16(uint32_t a, uint16_t v)
     longjmp(trapbuf, INTBUS);
 }
 
-uint16_t read16(uint32_t a)
+void write16(uint32_t a, uint16_t v)
+{
+    trace_io("WRITE16", a, v);
+    write16_impl(a, v);
+}
+
+static uint16_t read16_impl(uint32_t a)
 {
     if (a % 2 != 0)
     {
@@ -508,6 +542,7 @@ uint16_t read16(uint32_t a)
 #endif
 
     case DEV_KW_LKS:
+        kw11::trace_access("KW11-L", "READ16", a, kw11::LKS);
         readReturn kw11::LKS;
         break;
 
@@ -660,6 +695,13 @@ uint16_t read16(uint32_t a)
     }
 
     longjmp(trapbuf, INTBUS);
+}
+
+uint16_t read16(uint32_t a)
+{
+    uint16_t value = read16_impl(a);
+    trace_io("READ16", a, value);
+    return value;
 }
 
 };  // namespace dd11

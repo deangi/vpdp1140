@@ -50,6 +50,8 @@ namespace rl11 {
 static const uint32_t SECS_PER_TRACK = 40;
 static const uint32_t SURFACES       = 2;
 static const uint32_t BYTES_PER_SEC  = 256;
+static const uint16_t RL01_CYLINDERS = 256;
+static const uint16_t RL02_CYLINDERS = 512;
 static const uint16_t IRQ_DELAY_TICKS = 2;
 
 // Programmable registers (all 16-bit on the bus).
@@ -67,6 +69,8 @@ uint16_t rl_cur_cyl  = 0;
 uint16_t rl_cur_surf = 0;
 
 bool attached[4] = { false, false, false, false };
+static uint16_t media_cylinders[4] = { 0, 0, 0, 0 };
+static bool media_is_rl02[4] = { false, false, false, false };
 static uint16_t irq_pending = 0;
 static constexpr bool IRQ_TRACE = false;
 static int irq_trace_left = 24;
@@ -80,6 +84,52 @@ static void trace_irq(const char *event, uint16_t value)
             (unsigned)irq_pending);
         irq_trace_left--;
     }
+}
+
+bool valid_image_size(uint32_t bytes)
+{
+    return bytes == RL01_IMAGE_BYTES || bytes == RL02_IMAGE_BYTES;
+}
+
+const char* image_type_name(uint32_t bytes)
+{
+    if (bytes == RL01_IMAGE_BYTES) return "RL01";
+    if (bytes == RL02_IMAGE_BYTES) return "RL02";
+    return "invalid";
+}
+
+const char* mounted_media_type(int unit)
+{
+    if (unit < 0 || unit >= 4 || !disk_is_mounted(unit)) return "empty";
+    return valid_image_size(disk_size_bytes(unit))
+             ? image_type_name(disk_size_bytes(unit)) : "invalid";
+}
+
+static void refresh_media_type(int unit)
+{
+    if (unit < 0 || unit >= 4) return;
+    media_cylinders[unit] = 0;
+    media_is_rl02[unit] = false;
+    attached[unit] = false;
+
+    if (!disk_is_mounted(unit)) return;
+
+    uint32_t bytes = disk_size_bytes(unit);
+    if (bytes == RL01_IMAGE_BYTES) {
+        media_cylinders[unit] = RL01_CYLINDERS;
+        attached[unit] = true;
+    } else if (bytes == RL02_IMAGE_BYTES) {
+        media_cylinders[unit] = RL02_CYLINDERS;
+        media_is_rl02[unit] = true;
+        attached[unit] = true;
+    }
+}
+
+bool validate_mounted_media(int unit)
+{
+    if (unit < 0 || unit >= 4) return false;
+    refresh_media_type(unit);
+    return attached[unit];
 }
 
 void reset()
@@ -97,16 +147,20 @@ void reset()
     RLBAE = 0;
     rl_cur_cyl  = 0;
     rl_cur_surf = 0;
-    // Map each RL drive to the corresponding disk slot (0..3). We only
-    // expect RL images in slots 0 (dl0) and 1 (dl1) but report all four
-    // honestly based on whatever the host has mounted.
-    for (int i = 0; i < 4; i++) attached[i] = disk_is_mounted(i);
+    // Map each RL drive to the corresponding disk slot (0..3). Only exact
+    // RL01/RL02 image sizes are considered attached RL media.
+    for (int i = 0; i < 4; i++) refresh_media_type(i);
 }
 
 void media_changed(int unit, bool mounted)
 {
     if (unit < 0 || unit >= 4) return;
-    attached[unit] = mounted;
+    if (mounted) refresh_media_type(unit);
+    else {
+        attached[unit] = false;
+        media_cylinders[unit] = 0;
+        media_is_rl02[unit] = false;
+    }
     if (!mounted && (((RLCS >> 8) & 3) == unit))
         RLCS &= ~0x0001;
 }
@@ -187,17 +241,17 @@ static void execute()
         break;
 
     case 2: { // GET STATUS
-        // RLMP returns the drive status word. Easy story: locked-on,
-        // heads loaded, brushes home, no errors, drive type RL02.
+        // RLMP returns the drive status word.
         // Bit layout (DEC RL11 spec): bits 2:0=state(5=lock-on),
-        // bit 3=brush home, bit 4=heads out, bit 5=cover open, bit 6=hi
-        // density (RL02), bit 7=write protect, ...
+        // bit 3=brush home, bit 4=heads out, bit 6=head select,
+        // bit 7=drive type (RL02), bit 13=write lock.
         uint16_t mp = 0;
-        mp |= 5;            // state 5 = lock-on
-        mp |= (1 << 3);     // brush home
-        mp |= (1 << 4);     // heads out
-        mp |= (1 << 6);     // RL02 (high density)
-        if (disk_is_readonly(drv)) mp |= (1 << 7); // write protect
+        mp |= 0000005;       // state 5 = lock-on
+        mp |= 0000010;       // brush home
+        mp |= 0000020;       // heads out
+        if (rl_cur_surf) mp |= 0000100;
+        if (media_is_rl02[drv]) mp |= 0000200;
+        if (disk_is_readonly(drv)) mp |= 0020000;
         RLMP = mp;
         break;
     }
@@ -215,7 +269,8 @@ static void execute()
         uint16_t diff   = (RLDA & 0xFF80) >> 7; // cyl diff (9 bits)
         uint16_t newsurf = (RLDA >> 4) & 1;
         bool     dir_in = (RLDA & 4) != 0;       // 1 = toward higher cyl
-        if (dir_in) rl_cur_cyl = (rl_cur_cyl + diff > 511) ? 511 : (rl_cur_cyl + diff);
+        uint16_t max_cyl = media_cylinders[drv] ? media_cylinders[drv] - 1 : 0;
+        if (dir_in) rl_cur_cyl = (rl_cur_cyl + diff > max_cyl) ? max_cyl : (rl_cur_cyl + diff);
         else        rl_cur_cyl = (diff > rl_cur_cyl) ? 0 : (rl_cur_cyl - diff);
         rl_cur_surf = newsurf;
         // After seek, RLDA reports the new (cyl, surf, sec=0) position.
@@ -241,6 +296,12 @@ static void execute()
     case 6:   // READ DATA
     case 7: { // READ DATA WITHOUT HEADER CHECK
         bool writing = (func == 5);
+        uint32_t cyl = (RLDA >> 7) & 0x1FF;
+        uint32_t sec = RLDA & 0x3F;
+        if (sec >= SECS_PER_TRACK || cyl >= media_cylinders[drv]) {
+            RLCS |= 0x8400;
+            break;
+        }
         uint32_t off = da_to_offset(RLDA);
         uint32_t ba  = bus_addr();
         // Word count is 2's-complement in RLMP; transfer terminates
@@ -258,7 +319,7 @@ static void execute()
             if (writing) {
                 // pull from guest memory into our buffer
                 for (uint32_t i = 0; i < chunk_words; i++) {
-                    uint16_t v = dd11::read16(ba + i * 2);
+                    uint16_t v = dd11::read16((ba + i * 2) & 0777777u);
                     scratch[i * 2]     = (uint8_t)(v & 0xFF);
                     scratch[i * 2 + 1] = (uint8_t)((v >> 8) & 0xFF);
                 }
@@ -274,11 +335,11 @@ static void execute()
                 for (uint32_t i = 0; i < chunk_words; i++) {
                     uint16_t v = (uint16_t)scratch[i * 2]
                                | ((uint16_t)scratch[i * 2 + 1] << 8);
-                    dd11::write16(ba + i * 2, v);
+                    dd11::write16((ba + i * 2) & 0777777u, v);
                 }
             }
 
-            ba         += chunk_bytes;
+            ba          = (ba + chunk_bytes) & 0777777u;
             off        += chunk_bytes;
             words_left -= chunk_words;
             RLMP       = (uint16_t)(RLMP + chunk_words);  // ticks toward 0

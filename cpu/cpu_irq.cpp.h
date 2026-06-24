@@ -147,6 +147,10 @@ void cancelinterrupt(uint8_t vec)
 void handleinterrupt()
 {
     uint8_t vec = itab[0].vec;
+    if (vec == INTCLOCK)
+        kw11::trace_interrupt("KW11-L", "deliver", vec, itab[0].pri);
+    else if (vec == INTRTC)
+        kw11::trace_interrupt("KW11-P", "deliver", vec, itab[0].pri);
     if (DEBUG_INTER)
     {
         if (PRINTSIMLINES)

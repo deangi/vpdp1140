@@ -71,6 +71,39 @@ uint16_t TKB;
 uint16_t TPS;
 uint16_t TPB;
 
+static uint32_t console_trace_count = 0;
+
+void set_console_trace(uint32_t count)
+{
+    console_trace_count = count;
+}
+
+uint32_t console_trace_remaining()
+{
+    return console_trace_count;
+}
+
+static void trace_console_char(const char* direction, uint8_t value)
+{
+    if (console_trace_count == 0) return;
+    console_trace_count--;
+
+    char display[8];
+    if (value >= 0x20 && value <= 0x7e) {
+        display[0] = '\'';
+        display[1] = (char)value;
+        display[2] = '\'';
+        display[3] = '\0';
+    } else {
+        snprintf(display, sizeof(display), "^%c",
+                 value < 0x20 ? (char)(value + '@') : '?');
+    }
+
+    LOG("CONSOLE %s char=%03o %s PC=%06o remaining=%u",
+        direction, (unsigned)value, display, (unsigned)procNS::curPC,
+        (unsigned)console_trace_count);
+}
+
 // 8 KB KL11->USB-Serial FIFO. The TFT and Telnet sinks own their own
 // FIFOs inside console.cpp / telnet.cpp; this one stays here because
 // there's no "serial" module to put it in. Storage lives in PSRAM.
@@ -118,6 +151,22 @@ static bool     s_fifo_drained    = true;   // true at boot -> first char is imm
 // polls instead; output timing below still runs every poll.
 #define KL11_RX_POLL_DIV 100
 static uint8_t  s_rx_poll_div = KL11_RX_POLL_DIV - 1;
+
+static void update_rx_interrupt()
+{
+    if ((TKS & 0x80) && (TKS & (1 << 6)))
+        procNS::interrupt(INTTTYIN, 4);
+    else
+        procNS::cancelinterrupt(INTTTYIN);
+}
+
+static void update_tx_interrupt()
+{
+    if ((TPS & 0x80) && (TPS & (1 << 6)))
+        procNS::interrupt(INTTTYOUT, 4);
+    else
+        procNS::cancelinterrupt(INTTTYOUT);
+}
 
 void reset()
 {
@@ -189,10 +238,7 @@ static void addchar(char c)
 #endif
 
     TKS |= 0x80;
-    if (TKS & (1 << 6))
-    {
-        procNS::interrupt(INTTTYIN, 4);
-    }
+    update_rx_interrupt();
 }
 
 bool queue_control_reply(const char* payload)
@@ -396,10 +442,7 @@ void poll()
             uint8_t out = TPB & 0x7f;  // strip parity bit
             process_console_output(out);
             TPS |= 0x80;
-            if (TPS & (1 << 6))
-            {
-                procNS::interrupt(INTTTYOUT, 4);
-            }
+            update_tx_interrupt();
         }
     }
 }
@@ -416,6 +459,8 @@ uint16_t read16(uint32_t a)
             // Clear only bit 7 (RX done); bit 0 is the reader-enable
             // flag which is set by software, not by reading TKB.
             TKS &= 0xff7f;
+            update_rx_interrupt();
+            trace_console_char("READ ", (uint8_t)TKB);
             return TKB;
         }
         return 0;
@@ -438,45 +483,38 @@ void write16(uint32_t a, uint16_t v)
     switch (a)
     {
     case DEV_CONSOLE_TTY_IN_STATUS:
-        // Real DL11: enabling IE while ready=1 (a queued char already
-        // present) fires the IRQ immediately. RT-11 SJ relies on this
-        // edge to kick its input handler.
+        // Real DL11: IE gates the request line. If software enables IE
+        // while DONE is already set, request immediately; if it clears IE
+        // while a request is queued, remove the stale pending vector.
         if (v & (1 << 6))
         {
-            bool was_off = (TKS & (1 << 6)) == 0;
             TKS |= 1 << 6;
-            if (was_off && (TKS & 0x80))
-            {
-                procNS::interrupt(INTTTYIN, 4);
-            }
         }
         else
         {
             TKS &= ~(1 << 6);
         }
+        update_rx_interrupt();
         break;
     case DEV_CONSOLE_TTY_OUT_STATUS:
-        // Real DL11: enabling IE while ready=1 (transmitter idle) fires
-        // the IRQ immediately so the output ISR can pull the first char
-        // from its buffer. Without this, RT-11 SJ's output buffer never
-        // starts draining and the console stays silent.
+        // Real DL11: IE gates the request line. If software enables IE
+        // while READY is already set, request immediately; if it clears IE
+        // while a request is queued, remove the stale pending vector.
         if (v & (1 << 6))
         {
-            bool was_off = (TPS & (1 << 6)) == 0;
             TPS |= 1 << 6;
-            if (was_off && (TPS & 0x80))
-            {
-                procNS::interrupt(INTTTYOUT, 4);
-            }
         }
         else
         {
             TPS &= ~(1 << 6);
         }
+        update_tx_interrupt();
         break;
     case DEV_CONSOLE_TTY_OUT_DATA:
         TPB = v & 0xff;
+        trace_console_char("WRITE", (uint8_t)TPB);
         TPS &= 0xff7f;
+        update_tx_interrupt();
         count = 0;
         break;
     case DEV_CONSOLE_TTY_IN_DATA:

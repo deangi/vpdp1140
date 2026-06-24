@@ -52,6 +52,17 @@ struct AppConfig {
   // typical. Honoured by kl11::poll. Default 20.
   int    diag_serialdelay_ms = 20;
 
+  // Number of upcoming I/O-page reads/writes to log. The counter decreases
+  // to zero automatically. 0 disables I/O tracing.
+  int    diag_io_trace = 0;
+
+  // Number of upcoming KW11-L/KW11-P register or interrupt events to log.
+  int    diag_clock_trace = 0;
+
+  // Number of upcoming characters read from or written to the KL11 console
+  // data registers to log. The counter decreases to zero automatically.
+  int    diag_console_trace = 0;
+
   // Per-instruction trace ring for panic diagnosis. Disabled by default
   // because it costs an MMU decode, instruction read, and register snapshot
   // on every guest instruction.
@@ -120,6 +131,8 @@ bool config_load_pdp (AppConfig& cfg);                       // returns true if 
 bool config_write_default_wifi(const AppConfig& cfg);        // writes a fresh /wificonfig.ini
 bool config_write_default_pdp (const AppConfig& cfg);        // writes a fresh /pdpconfig.ini
 void config_apply_compiled_defaults(AppConfig& cfg);         // fills cfg with secrets.h + config.h defaults
+void config_set_boot_input(AppConfig& cfg, const String& encoded);
+String config_escape_bytes(const uint8_t* bytes, size_t len);
 
 // SD-to-SD byte copy used by the variant picker. Truncates dst.
 bool config_copy_file(const char* src, const char* dst);

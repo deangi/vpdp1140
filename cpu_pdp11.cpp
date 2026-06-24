@@ -177,6 +177,8 @@ void panic() {
 static uint8_t*       s_mem = nullptr;
 static uint32_t       s_inst_count = 0;
 static volatile bool  s_halt_requested = false;
+static volatile bool  s_monitor_paused = false;
+static volatile uint32_t s_monitor_trace_left = 0;
 static bool           s_sam11_inited = false;
 // 0 = RL (bootrom_rl0, for RL02 XXDP+/etc.), 1 = RK (bootrom_rk0, for RK05
 // RT-11/Unix V6/etc.). vpdp1140.ino sets this from cfg.boot_kind before
@@ -197,6 +199,8 @@ bool cpu_init() {
   memset(s_mem, 0, VPDP_RAM_SIZE);
   s_inst_count     = 0;
   s_halt_requested = false;
+  s_monitor_paused = false;
+  s_monitor_trace_left = 0;
   ms11::begin();
   // First call to cpu_reset() will pull in the bootrom and reset the CPU.
   s_sam11_inited = false;
@@ -312,6 +316,8 @@ void cpu_reset() {
 
   s_sam11_inited = true;
   s_halt_requested = false;
+  s_monitor_paused = false;
+  s_monitor_trace_left = 0;
 }
 
 void cpu_cold_boot() {
@@ -324,7 +330,10 @@ void cpu_cold_boot() {
 // are caught by the setjmp/longjmp pair (kd11/dd11 longjmp to trapbuf with
 // the trap vector, and we route it back through kd11::trapat()).
 uint32_t cpu_run(uint32_t max_cycles) {
-  if (!s_sam11_inited || g_panicked) { yield(); return 0; }
+  if (!s_sam11_inited || g_panicked || s_monitor_paused) {
+    yield();
+    return 0;
+  }
 
   uint32_t executed = 0;
   // Catch panics (longjmp from panic()) BEFORE we'd otherwise route them
@@ -379,6 +388,25 @@ uint32_t cpu_run(uint32_t max_cycles) {
       e.ps    = kd11::PS;
       s_trace_idx = (s_trace_idx + 1) % TRACE_RING_SIZE;
     }
+    if (s_monitor_trace_left > 0) {
+      uint16_t pc = (uint16_t)kd11::R[7];
+      uint32_t physical = kt11::decode_instr(pc, false, kd11::curuser);
+      uint16_t instruction = dd11::read16(physical);
+      char disassembly[128];
+      disasm_format(physical, pc, disassembly, sizeof(disassembly));
+      LOG("trace: PC=%06o ins=%06o R0=%06o R1=%06o R2=%06o R3=%06o R4=%06o R5=%06o SP=%06o PS=%06o %s",
+          (unsigned)pc, (unsigned)instruction,
+          (unsigned)((uint16_t)kd11::R[0]),
+          (unsigned)((uint16_t)kd11::R[1]),
+          (unsigned)((uint16_t)kd11::R[2]),
+          (unsigned)((uint16_t)kd11::R[3]),
+          (unsigned)((uint16_t)kd11::R[4]),
+          (unsigned)((uint16_t)kd11::R[5]),
+          (unsigned)((uint16_t)kd11::R[6]),
+          (unsigned)kd11::PS,
+          disassembly);
+      s_monitor_trace_left--;
+    }
     kd11::step();
     kw11::tick();
     kwp::tick();    // KW11-P programmable clock countdown
@@ -397,6 +425,34 @@ uint32_t cpu_run(uint32_t max_cycles) {
 void cpu_request_halt() { s_halt_requested = true; }
 void cpu_set_trace(bool enabled) { s_trace_enable = enabled; }
 
+void cpu_monitor_pause() {
+  s_monitor_paused = true;
+}
+
+void cpu_monitor_continue() {
+  s_monitor_paused = false;
+}
+
+bool cpu_monitor_paused() {
+  return s_monitor_paused;
+}
+
+uint32_t cpu_monitor_step() {
+  if (!s_sam11_inited || g_panicked) return 0;
+  s_monitor_paused = false;
+  uint32_t executed = cpu_run(1);
+  s_monitor_paused = true;
+  return executed;
+}
+
+void cpu_monitor_trace_next(uint32_t count) {
+  s_monitor_trace_left = count;
+}
+
+uint32_t cpu_monitor_trace_remaining() {
+  return s_monitor_trace_left;
+}
+
 uint8_t* cpu_mem()       { return s_mem; }
 uint32_t cpu_mem_size()  { return VPDP_RAM_SIZE; }
 
@@ -407,6 +463,35 @@ uint16_t cpu_reg16(int idx) {
 uint16_t cpu_pc()         { return kd11::curPC; }
 uint16_t cpu_psw()        { return kd11::PS; }
 uint32_t cpu_inst_count() { return s_inst_count; }
+
+bool cpu_next_instruction(uint16_t* address, uint16_t* opcode) {
+  if (!s_sam11_inited || !address || !opcode) return false;
+  *address = (uint16_t)kd11::R[7];
+  *opcode = dd11::read16(
+      kt11::decode_instr(*address, false, kd11::curuser));
+  return true;
+}
+
+bool cpu_disassemble_next(char* buffer, size_t size) {
+  if (!s_sam11_inited || !buffer || size == 0) return false;
+  uint16_t address = (uint16_t)kd11::R[7];
+  uint32_t physical = kt11::decode_instr(address, false, kd11::curuser);
+  return disasm_format(physical, address, buffer, size);
+}
+
+bool cpu_read_physical_word(uint32_t address, uint16_t* value) {
+  if (!s_mem || !value || (address & 1) || address >= 0760000u) return false;
+  *value = (uint16_t)s_mem[address]
+         | ((uint16_t)s_mem[address + 1] << 8);
+  return true;
+}
+
+bool cpu_write_physical_word(uint32_t address, uint16_t value) {
+  if (!s_mem || (address & 1) || address >= 0760000u) return false;
+  s_mem[address] = (uint8_t)(value & 0xff);
+  s_mem[address + 1] = (uint8_t)(value >> 8);
+  return true;
+}
 
 void cpu_set_pc(uint16_t pc) { kd11::R[7] = pc; kd11::curPC = pc; }
 

@@ -58,6 +58,9 @@ void poll();
 // for line-buffered terminal bursts). Set from [diag] serialdelay.
 extern uint32_t serial_in_delay_ms;
 
+void set_console_trace(uint32_t count);
+uint32_t console_trace_remaining();
+
 // Drain queued KL11->USB-Serial bytes (called from loop() on core 1).
 // The KL11 push path is non-blocking; this turns the 8 KB FIFO into
 // actual Serial.write() output at whatever pace the host can take.

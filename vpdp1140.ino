@@ -50,8 +50,10 @@
 #include "cpu_pdp11.h"
 #include "kl11.h"        // kl11::drain_serial_out() in loop()
 #include "dd11.h"  // dd11::v4b_quirks_enabled gate
+#include "kw11.h"
 #include "kwp.h"   // kwp::enabled gate
 #include "disk.h"
+#include "rl11.h"
 #include "console.h"
 #include "telnet.h"
 #include "telnet_shell.h"
@@ -137,8 +139,7 @@ static const char* boot_unit_label() {
 static const String& boot_image_path() {
   int slot = (cfg.boot_drive >= 'a' && cfg.boot_drive <= 'd')
                ? (cfg.boot_drive - 'a') : 0;
-  if (slot == 0 && cfg.boot_kind == AppConfig::BK_RK
-      && cfg.disk_rk0.length()) return cfg.disk_rk0;
+  if (slot == 0 && cfg.boot_kind == AppConfig::BK_RK) return cfg.disk_rk0;
   const String* paths[4] = { &cfg.disk_a, &cfg.disk_b, &cfg.disk_c, &cfg.disk_d };
   return *paths[slot];
 }
@@ -221,6 +222,12 @@ static void sd_and_config_init() {
   // honor what pdpconfig.ini said. Must happen before cpu_reset() / any
   // guest memory access.
   dd11::v4b_quirks_enabled = cfg.v4b_quirks;
+  dd11::set_io_trace((uint32_t)(cfg.diag_io_trace < 0
+                                  ? 0 : cfg.diag_io_trace));
+  kw11::set_clock_trace((uint32_t)(cfg.diag_clock_trace < 0
+                                     ? 0 : cfg.diag_clock_trace));
+  kl11::set_console_trace((uint32_t)(cfg.diag_console_trace < 0
+                                      ? 0 : cfg.diag_console_trace));
   kwp::enabled             = cfg.kwp_enabled;
   cpu_set_trace(cfg.diag_trace);
   kl11::serial_in_delay_ms = (uint32_t)(cfg.diag_serialdelay_ms < 0 ? 0
@@ -253,7 +260,7 @@ static void disks_mount() {
 
   const bool rk_boot = (cfg.boot_kind == AppConfig::BK_RK);
   const String* paths[4] = {
-    rk_boot && cfg.disk_rk0.length() ? &cfg.disk_rk0 : &cfg.disk_a,
+    rk_boot ? &cfg.disk_rk0 : &cfg.disk_a,
     &cfg.disk_b, &cfg.disk_c, &cfg.disk_d
   };
   const char* unit_names[4] = {
@@ -262,6 +269,16 @@ static void disks_mount() {
   for (int s = 0; s < 4; s++) {
     if (paths[s]->length() == 0) continue;
     bool ok = disk_mount(s, paths[s]->c_str());
+    bool is_rl_slot = !(rk_boot && s == DRIVE_A);
+    if (ok && is_rl_slot && !rl11::validate_mounted_media(s)) {
+      uint32_t bytes = disk_size_bytes(s);
+      LOGE("disks_mount %s: \"%s\" rejected, RL image size is %u bytes; expected RL01=%u or RL02=%u",
+           unit_names[s], paths[s]->c_str(), (unsigned)bytes,
+           (unsigned)rl11::RL01_IMAGE_BYTES,
+           (unsigned)rl11::RL02_IMAGE_BYTES);
+      disk_dismount(s);
+      ok = false;
+    }
     LOG("disks_mount %s: \"%s\" -> %s",
         unit_names[s], paths[s]->c_str(), ok ? "mounted" : "FAILED");
   }
