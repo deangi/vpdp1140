@@ -34,7 +34,8 @@ static const uint16_t kPalette[16] = {
 // ANSI SGR fg/bg code (30-37) -> CGA colour index
 static const uint8_t kAnsiToCga[8] = { 0, 4, 2, 6, 1, 5, 3, 7 };
 
-#define DEF_ATTR 0x07          // light grey on black
+#define DEF_ATTR     0x07      // light grey on black
+#define ATTR_INVERSE 0x80
 
 // ---- screen state ----
 static uint8_t  cell_ch[CON_ROWS][CON_COLS];
@@ -50,10 +51,30 @@ static int  sr_top = 0, sr_bot = CON_ROWS - 1;
 static int  saved_r = 0, saved_c = 0;
 
 // ---- ANSI parser ----
-static enum { ST_GROUND, ST_ESC, ST_CSI } ansi_st = ST_GROUND;
+static enum { ST_GROUND, ST_ESC, ST_CSI, ST_CHARSET_DESIGNATE } ansi_st = ST_GROUND;
 static int  csi_param[8];
 static int  csi_nparam = 0;
 static bool csi_has_digit = false;
+static bool csi_private = false;
+
+typedef enum { CHARSET_ASCII, CHARSET_VT100_GRAPHICS } ConsoleCharset;
+
+static ConsoleCharset g0_charset = CHARSET_ASCII;
+static enum { ACTIVE_G0, ACTIVE_G1 } active_charset = ACTIVE_G0;
+static ConsoleCharset g1_charset = CHARSET_ASCII;
+static uint8_t charset_designate_target = 0;
+
+#define GLYPH_HLINE 0x80
+#define GLYPH_VLINE 0x81
+#define GLYPH_UL    0x82
+#define GLYPH_UR    0x83
+#define GLYPH_LL    0x84
+#define GLYPH_LR    0x85
+#define GLYPH_LTEE  0x86
+#define GLYPH_RTEE  0x87
+#define GLYPH_BTEE  0x88
+#define GLYPH_TTEE  0x89
+#define GLYPH_CROSS 0x8A
 
 // ---- 8 KB serial-input FIFO (host USB-Serial -> KL11 TKB) and 8 KB
 //      TFT-output FIFO (KL11 TPB -> ANSI parser -> cell grid). Both live
@@ -83,6 +104,10 @@ void console_init() {
   cur_attr = DEF_ATTR;
   sr_top = 0; sr_bot = CON_ROWS - 1;
   ansi_st = ST_GROUND;
+  csi_private = false;
+  g0_charset = CHARSET_ASCII;
+  g1_charset = CHARSET_ASCII;
+  active_charset = ACTIVE_G0;
   shad_valid = false;
   g_serial_in.init(serial_in_storage, VPDP_FIFO_BYTES);
   g_tft_out.init(tft_out_storage, VPDP_FIFO_BYTES);
@@ -125,9 +150,29 @@ static void clamp_cursor() {
 }
 
 // ---- printable character ----
+static uint8_t translate_printable(uint8_t ch) {
+  uint8_t charset = (active_charset == ACTIVE_G1) ? g1_charset : g0_charset;
+  if (charset != CHARSET_VT100_GRAPHICS) return ch;
+
+  switch (ch) {
+    case 'q': return GLYPH_HLINE;
+    case 'x': return GLYPH_VLINE;
+    case 'l': return GLYPH_UL;
+    case 'k': return GLYPH_UR;
+    case 'm': return GLYPH_LL;
+    case 'j': return GLYPH_LR;
+    case 't': return GLYPH_LTEE;
+    case 'u': return GLYPH_RTEE;
+    case 'v': return GLYPH_BTEE;
+    case 'w': return GLYPH_TTEE;
+    case 'n': return GLYPH_CROSS;
+    default:  return ch;
+  }
+}
+
 static void put_glyph(uint8_t ch) {
   if (cur_c >= CON_COLS) { cur_c = 0; cursor_down_scroll(); }
-  cell_ch[cur_r][cur_c] = ch;
+  cell_ch[cur_r][cur_c] = translate_printable(ch);
   cell_at[cur_r][cur_c] = cur_attr;
   cur_c++;
 }
@@ -139,9 +184,29 @@ static void apply_sgr() {
     int p = csi_param[i];
     if (p == 0)                       cur_attr = DEF_ATTR;
     else if (p == 1)                  cur_attr |= 0x08;            // bright fg
+    else if (p == 7)                  cur_attr |= ATTR_INVERSE;    // inverse video
+    else if (p == 27)                 cur_attr &= ~ATTR_INVERSE;   // inverse off
     else if (p >= 30 && p <= 37)      cur_attr = (cur_attr & 0xF8) | kAnsiToCga[p - 30];
     else if (p >= 40 && p <= 47)      cur_attr = (cur_attr & 0x8F) | (kAnsiToCga[p - 40] << 4);
     else if (p >= 90 && p <= 97)      cur_attr = (cur_attr & 0xF0) | kAnsiToCga[p - 90] | 0x08;
+  }
+}
+
+static void exec_private_csi(uint8_t final) {
+  if (final != 'h' && final != 'l') return;
+
+  // DEC private modes. These affect local keyboard/display behavior on a real
+  // VT100; the TFT console only needs to consume them cleanly.
+  for (int i = 0; i < csi_nparam; i++) {
+    switch (csi_param[i]) {
+      case 1:   // DECCKM - cursor key mode
+      case 7:   // DECAWM - autowrap
+      case 8:   // DECARM - keyboard autorepeat
+      case 25:  // DECTCEM - cursor visibility
+        break;
+      default:
+        break;
+    }
   }
 }
 
@@ -166,6 +231,11 @@ static void erase_in_line(int mode) {
 
 // ---- execute a completed CSI sequence ----
 static void exec_csi(uint8_t final) {
+  if (csi_private) {
+    exec_private_csi(final);
+    return;
+  }
+
   int p0 = csi_nparam > 0 ? csi_param[0] : 0;
   int p1 = csi_nparam > 1 ? csi_param[1] : 0;
   switch (final) {
@@ -223,6 +293,8 @@ static void feed_ansi(uint8_t c) {
     case ST_GROUND:
       switch (c) {
         case 0x1B: ansi_st = ST_ESC; break;
+        case 0x0E: active_charset = ACTIVE_G1; break;              // SO
+        case 0x0F: active_charset = ACTIVE_G0; break;              // SI
         case 0x07: break;                                  // BEL - ignore
         case 0x08: if (cur_c > 0) cur_c--; break;           // BS
         case 0x09:                                          // TAB
@@ -240,7 +312,26 @@ static void feed_ansi(uint8_t c) {
     case ST_ESC:
       if (c == '[') {
         ansi_st = ST_CSI;
-        csi_nparam = 0; csi_param[0] = 0; csi_has_digit = false;
+        csi_nparam = 0; csi_param[0] = 0; csi_has_digit = false; csi_private = false;
+      } else if (c == '(' || c == ')') {
+        charset_designate_target = (c == '(') ? 0 : 1;
+        ansi_st = ST_CHARSET_DESIGNATE;
+      } else if (c == 'D') {                                      // IND
+        cursor_down_scroll();
+        ansi_st = ST_GROUND;
+      } else if (c == 'E') {                                      // NEL
+        cur_c = 0;
+        cursor_down_scroll();
+        ansi_st = ST_GROUND;
+      } else if (c == 'M') {                                      // RI
+        if (cur_r > sr_top) cur_r--;
+        ansi_st = ST_GROUND;
+      } else if (c == '7') {
+        saved_r = cur_r; saved_c = cur_c;
+        ansi_st = ST_GROUND;
+      } else if (c == '8') {
+        cur_r = saved_r; cur_c = saved_c; clamp_cursor();
+        ansi_st = ST_GROUND;
       } else {
         ansi_st = ST_GROUND;       // other ESC sequences not supported
       }
@@ -255,17 +346,62 @@ static void feed_ansi(uint8_t c) {
         if (csi_nparam == 0) csi_nparam = 1;
         if (csi_nparam < 8) { csi_param[csi_nparam] = 0; csi_nparam++; }
         csi_has_digit = false;
-      } else if (c == '?' || c == '>' || c == '=') {
-        // private-mode introducer - ignore, keep parsing
+      } else if (c == '?' && csi_nparam == 0 && !csi_has_digit) {
+        csi_private = true;
+      } else if (c == '>' || c == '=') {
+        // Other private-mode introducers - consume and keep parsing.
       } else if (c >= 0x40 && c <= 0x7E) {
         exec_csi(c);
         ansi_st = ST_GROUND;
+        csi_private = false;
       } else {
         ansi_st = ST_GROUND;       // malformed - bail
+        csi_private = false;
       }
       break;
+
+    case ST_CHARSET_DESIGNATE: {
+      ConsoleCharset charset = (c == '0') ? CHARSET_VT100_GRAPHICS : CHARSET_ASCII;
+      if (charset_designate_target == 0) {
+        g0_charset = charset;
+      } else {
+        g1_charset = charset;
+        // Some hosts send ESC ) 0 / ESC ) B without explicit SO/SI.
+        active_charset = (charset == CHARSET_VT100_GRAPHICS) ? ACTIVE_G1 : ACTIVE_G0;
+      }
+      ansi_st = ST_GROUND;
+      break;
+    }
   }
 }
+
+#ifdef CONSOLE_VT100_SELFTEST
+static bool console_vt100_selftest() {
+  console_init();
+  const uint8_t decarm[] = { 0x1B, '[', '?', '8', 'l', 0x1B, '[', '?', '8', 'h', 'A' };
+  for (uint8_t b : decarm) feed_ansi(b);
+  if (cell_ch[0][0] != 'A') return false;
+
+  console_init();
+  const uint8_t inverse[] = { 0x1B, '[', '7', 'm', 'B', 0x1B, '[', 'm', 'C' };
+  for (uint8_t b : inverse) feed_ansi(b);
+  if ((cell_at[0][0] & ATTR_INVERSE) == 0) return false;
+  if ((cell_at[0][1] & ATTR_INVERSE) != 0) return false;
+
+  console_init();
+  const uint8_t g0_box[] = { 0x1B, '(', '0', 'l', 'q', 'k', 0x1B, '(', 'B' };
+  for (uint8_t b : g0_box) feed_ansi(b);
+  if (cell_ch[0][0] != GLYPH_UL || cell_ch[0][1] != GLYPH_HLINE || cell_ch[0][2] != GLYPH_UR) return false;
+
+  console_init();
+  const uint8_t g1_compat[] = { 0x1B, ')', '0', 'q', 'q', 'q', 0x1B, ')', 'B', 'q' };
+  for (uint8_t b : g1_compat) feed_ansi(b);
+  if (cell_ch[0][0] != GLYPH_HLINE || cell_ch[0][1] != GLYPH_HLINE || cell_ch[0][2] != GLYPH_HLINE) return false;
+  if (cell_ch[0][3] != 'q') return false;
+
+  return true;
+}
+#endif
 
 // ---- TFT-out FIFO: KL11 push, main-loop drain ----
 // Public entrypoint kl11::poll() calls per output byte. Just buffers.
@@ -293,7 +429,12 @@ static void draw_cell(TFT_eSPI& tft, int r, int c, bool cursor) {
   uint8_t ch  = cell_ch[r][c];
   uint8_t at  = cell_at[r][c];
   uint16_t fg = kPalette[at & 0x0F];
-  uint16_t bg = kPalette[(at >> 4) & 0x0F];
+  uint16_t bg = kPalette[(at >> 4) & 0x07];
+  if (at & ATTR_INVERSE) {
+    uint16_t tmp = fg;
+    fg = bg;
+    bg = tmp;
+  }
 
   uint16_t buf[4 * 8];
   for (int y = 0; y < 8; y++) {
